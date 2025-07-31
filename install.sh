@@ -93,7 +93,7 @@ while IFS= read -r -d '' script; do
     if [ "$(basename "$script")" != "install.sh" ]; then
         SCRIPTS+=("$script")
     fi
-done < <(find "$SCRIPT_DIR" -type f -executable -not -path "*/\.*" -print0)
+done < <(find "$SCRIPT_DIR" -type f -perm +111 -not -path "*/\.*" -print0)
 
 if [ ${#SCRIPTS[@]} -eq 0 ]; then
     print_color $RED "No executable scripts found to install."
