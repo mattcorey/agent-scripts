@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# Git Worktree List Script
+# Lists all worktrees with enhanced formatting
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: wt-list [options]"
+    echo ""
+    echo "Lists all git worktrees for the current repository."
+    echo ""
+    echo "Options:"
+    echo "  -v, --verbose    Show detailed information"
+    echo "  -h, --help       Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  wt-list"
+    echo "  wt-list --verbose"
+    exit 1
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    exit 1
+fi
+
+# Parse arguments
+VERBOSE=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Get project name
+PROJECT_NAME=$(basename "$(git rev-parse --show-toplevel)")
+
+echo "🌿 Git Worktrees for ${PROJECT_NAME}:"
+echo "=================================="
+
+# Check if there are any worktrees
+if ! git worktree list > /dev/null 2>&1; then
+    echo "No worktrees found."
+    exit 0
+fi
+
+# Get worktree information
+git worktree list --porcelain | while IFS= read -r line; do
+    if [[ $line == worktree* ]]; then
+        WORKTREE_PATH=${line#worktree }
+        WORKTREE_NAME=$(basename "$WORKTREE_PATH")
+        
+        # Read the next lines for branch and HEAD info
+        read -r BRANCH_LINE
+        BRANCH_NAME=${BRANCH_LINE#branch refs/heads/}
+        
+        # Check if it's the main worktree
+        if [[ "$WORKTREE_PATH" == "$(git rev-parse --show-toplevel)" ]]; then
+            echo "📁 ${WORKTREE_NAME} (main)"
+        else
+            echo "📁 ${WORKTREE_NAME}"
+        fi
+        
+        echo "   🌿 Branch: ${BRANCH_NAME}"
+        echo "   📍 Path: ${WORKTREE_PATH}"
+        
+        if [ "$VERBOSE" = true ]; then
+            # Get last commit info
+            cd "$WORKTREE_PATH"
+            LAST_COMMIT=$(git log -1 --pretty=format:"%h %s" 2>/dev/null || echo "No commits")
+            echo "   💾 Last commit: ${LAST_COMMIT}"
+            
+            # Check if there are uncommitted changes
+            if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+                echo "   ⚠️  Has uncommitted changes"
+            fi
+            
+            cd - > /dev/null
+        fi
+        
+        echo ""
+    fi
+done
+
+echo "💡 Tip: Use 'wt-add <branch-name>' to create a new worktree"
+echo "💡 Tip: Use 'wt-remove <worktree-name>' to remove a worktree"

@@ -1,0 +1,227 @@
+#!/bin/bash
+
+# Git Worktree DerivedData Finder Script
+# Finds the DerivedData path for a git worktree containing an Xcode project
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: wt-find-deriveddata <worktree-name> [options]"
+    echo ""
+    echo "Finds the DerivedData path for a git worktree containing an Xcode project."
+    echo ""
+    echo "Arguments:"
+    echo "  worktree-name   Name of the worktree directory to analyze"
+    echo ""
+    echo "Options:"
+    echo "  --current       Use current directory instead of worktree name"
+    echo "  --verbose       Show detailed information during detection"
+    echo "  -h, --help      Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  wt-find-deriveddata BrainstormAI-ui-tweaks"
+    echo "  wt-find-deriveddata --current"
+    echo "  wt-find-deriveddata MyProject-feature --verbose"
+    echo ""
+    echo "Output:"
+    echo "  Prints the DerivedData path to stdout on success"
+    echo "  Prints errors to stderr and exits with non-zero code on failure"
+    exit 1
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Parse arguments
+WORKTREE_NAME=""
+USE_CURRENT=false
+VERBOSE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --current)
+            USE_CURRENT=true
+            shift
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            if [ -z "$WORKTREE_NAME" ]; then
+                WORKTREE_NAME="$1"
+            else
+                echo "Error: Too many arguments" >&2
+                usage
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Determine the target path
+if [ "$USE_CURRENT" = true ]; then
+    TARGET_PATH=$(pwd)
+    if [ "$VERBOSE" = true ]; then
+        echo "Using current directory: $TARGET_PATH" >&2
+    fi
+else
+    # Check if worktree name is provided
+    if [ -z "$WORKTREE_NAME" ]; then
+        echo "Error: Worktree name is required (or use --current)" >&2
+        usage
+    fi
+    
+    # Find the actual worktree path by matching the name
+    ACTUAL_WORKTREE_PATH=$(git worktree list | grep -E "/${WORKTREE_NAME}\s+" | awk '{print $1}' | head -1)
+    
+    if [ -z "$ACTUAL_WORKTREE_PATH" ]; then
+        echo "Error: Worktree '${WORKTREE_NAME}' not found" >&2
+        echo "" >&2
+        echo "Available worktrees:" >&2
+        git worktree list | while read -r path branch commit; do
+            name=$(basename "$path")
+            echo "  - $name" >&2
+        done
+        exit 1
+    fi
+    
+    TARGET_PATH="$ACTUAL_WORKTREE_PATH"
+    if [ "$VERBOSE" = true ]; then
+        echo "Found worktree: $TARGET_PATH" >&2
+    fi
+fi
+
+# Verify target path exists
+if [ ! -d "$TARGET_PATH" ]; then
+    echo "Error: Target path does not exist: $TARGET_PATH" >&2
+    exit 1
+fi
+
+# Auto-detect project file (prefer .xcworkspace over .xcodeproj)
+PROJECT_FILE=""
+PROJECT_TYPE=""
+
+if [ "$VERBOSE" = true ]; then
+    echo "Searching for Xcode project files in: $TARGET_PATH" >&2
+fi
+
+# Check for workspace files first (use find to avoid issues with shell expansion)
+WORKSPACE_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
+if [ -n "$WORKSPACE_FILES" ]; then
+    PROJECT_FILE=$(echo "$WORKSPACE_FILES" | head -1)
+    PROJECT_TYPE="-workspace"
+    if [ "$VERBOSE" = true ]; then
+        echo "Found workspace: $(basename "$PROJECT_FILE")" >&2
+    fi
+else
+    # Check for project files
+    PROJECT_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null)
+    if [ -n "$PROJECT_FILES" ]; then
+        PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
+        PROJECT_TYPE="-project"
+        if [ "$VERBOSE" = true ]; then
+            echo "Found project: $(basename "$PROJECT_FILE")" >&2
+        fi
+    else
+        echo "Error: No Xcode project (.xcodeproj) or workspace (.xcworkspace) found in: $TARGET_PATH" >&2
+        exit 1
+    fi
+fi
+
+# Extract project name from file (remove path and extension)
+PROJECT_NAME=$(basename "$PROJECT_FILE" | sed -E 's/\.(xcworkspace|xcodeproj)$//')
+
+if [ "$VERBOSE" = true ]; then
+    echo "Project name: $PROJECT_NAME" >&2
+fi
+
+# Auto-detect scheme (try project name first, then fallback to available schemes)
+SCHEME="$PROJECT_NAME"
+
+if [ "$VERBOSE" = true ]; then
+    echo "Attempting to detect available schemes..." >&2
+fi
+
+# Try to get list of available schemes
+AVAILABLE_SCHEMES=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -list 2>/dev/null | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | grep -v '^$')
+
+if [ -n "$AVAILABLE_SCHEMES" ]; then
+    # Check if our assumed scheme (project name) exists in the list
+    if echo "$AVAILABLE_SCHEMES" | grep -q "^$PROJECT_NAME$"; then
+        SCHEME="$PROJECT_NAME"
+        if [ "$VERBOSE" = true ]; then
+            echo "Using scheme: $SCHEME (matches project name)" >&2
+        fi
+    else
+        # Use the first available scheme
+        SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
+        if [ "$VERBOSE" = true ]; then
+            echo "Project name scheme not found, using first available scheme: $SCHEME" >&2
+        fi
+    fi
+else
+    # Fallback to project name if we can't get the scheme list
+    if [ "$VERBOSE" = true ]; then
+        echo "Could not detect schemes, using project name as scheme: $SCHEME" >&2
+    fi
+fi
+
+if [ "$VERBOSE" = true ]; then
+    echo "Final scheme: $SCHEME" >&2
+fi
+
+# Generic destination for -showBuildSettings (use same format as deploy-to-simulator)
+DESTINATION="platform=iOS Simulator,OS=26.0,name=iPad Pro 11-inch (M4)"
+
+if [ "$VERBOSE" = true ]; then
+    echo "Getting DerivedData path using xcodebuild..." >&2
+    echo "Command: xcodebuild $PROJECT_TYPE \"$PROJECT_FILE\" -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
+fi
+
+# Get the DerivedData path using xcodebuild -showBuildSettings
+BUILD_DIR=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
+
+if [ -z "$BUILD_DIR" ]; then
+    echo "Error: Could not determine build directory using xcodebuild" >&2
+    echo "This might happen if:" >&2
+    echo "  - The scheme '$SCHEME' is invalid" >&2
+    echo "  - The project has configuration issues" >&2
+    echo "  - Xcode command line tools are not properly installed" >&2
+    exit 1
+fi
+
+# Extract DerivedData path (3 levels up from BUILT_PRODUCTS_DIR)
+# Path structure: DerivedData/ProjectName-hash/Build/Products/Debug-iphonesimulator/
+DERIVED_DATA_PATH=$(dirname $(dirname $(dirname "$BUILD_DIR")))
+
+if [ "$VERBOSE" = true ]; then
+    echo "Build directory: $BUILD_DIR" >&2
+    echo "DerivedData path: $DERIVED_DATA_PATH" >&2
+fi
+
+# Verify the DerivedData path exists and looks correct
+if [ ! -d "$DERIVED_DATA_PATH" ]; then
+    echo "Error: Calculated DerivedData path does not exist: $DERIVED_DATA_PATH" >&2
+    exit 1
+fi
+
+# Verify it's actually a DerivedData directory (should contain Build folder)
+if [ ! -d "$DERIVED_DATA_PATH/Build" ]; then
+    echo "Error: Path does not appear to be a valid DerivedData directory (missing Build folder): $DERIVED_DATA_PATH" >&2
+    exit 1
+fi
+
+# Output the DerivedData path to stdout
+echo "$DERIVED_DATA_PATH"

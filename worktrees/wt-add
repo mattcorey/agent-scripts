@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# Git Worktree Add Script
+# Creates a new worktree as a sister directory with project prefix
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: wt-add <branch-name> [base-branch]"
+    echo ""
+    echo "Creates a new git worktree in a sister directory to the current repo."
+    echo "The worktree directory will be named: <project-name>-<branch-name>"
+    echo ""
+    echo "Arguments:"
+    echo "  branch-name   Name of the new branch to create"
+    echo "  base-branch   Branch to base the new branch on (default: current branch)"
+    echo ""
+    echo "Examples:"
+    echo "  wt-add feature/auth"
+    echo "  wt-add hotfix/critical-bug main"
+    exit 1
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    exit 1
+fi
+
+# Check arguments
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    usage
+fi
+
+BRANCH_NAME="$1"
+BASE_BRANCH="${2:-$(git branch --show-current)}"
+
+# Get project name from the repository directory
+PROJECT_NAME=$(basename "$(git rev-parse --show-toplevel)")
+
+# Get the parent directory of the current repo
+PARENT_DIR=$(dirname "$(git rev-parse --show-toplevel)")
+
+# Create worktree directory name
+WORKTREE_DIR="${PARENT_DIR}/${PROJECT_NAME}-${BRANCH_NAME}"
+
+# Check if branch already exists
+if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+    echo "Error: Branch '${BRANCH_NAME}' already exists"
+    echo "Use 'git worktree add' directly if you want to checkout existing branch"
+    exit 1
+fi
+
+# Check if worktree directory already exists
+if [ -d "$WORKTREE_DIR" ]; then
+    echo "Error: Directory '${WORKTREE_DIR}' already exists"
+    exit 1
+fi
+
+echo "Creating worktree:"
+echo "  Project: ${PROJECT_NAME}"
+echo "  Branch: ${BRANCH_NAME} (from ${BASE_BRANCH})"
+echo "  Location: ${WORKTREE_DIR}"
+echo
+
+# Ensure we have the latest changes from remote
+echo "Pulling latest changes..."
+git pull --quiet || echo "Warning: Could not pull latest changes (might be offline or no remote)"
+
+# Create the worktree with new branch
+git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_BRANCH"
+
+echo
+echo "✅ Worktree created successfully!"
+echo "📁 Location: ${WORKTREE_DIR}"
+echo "🌿 Branch: ${BRANCH_NAME}"
+echo
+echo "To switch to the new worktree:"
+echo "  cd \"${WORKTREE_DIR}\""

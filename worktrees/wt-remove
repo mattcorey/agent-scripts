@@ -1,0 +1,223 @@
+#!/bin/bash
+
+# Git Worktree Remove Script
+# Removes a worktree and optionally deletes the associated branch
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: wt-remove <worktree-name> [options]"
+    echo ""
+    echo "Removes a git worktree and optionally deletes the associated branch."
+    echo ""
+    echo "Arguments:"
+    echo "  worktree-name   Name of the worktree directory to remove"
+    echo ""
+    echo "Options:"
+    echo "  --keep-branch   Keep the branch after removing worktree"
+    echo "  --force         Force removal even with uncommitted changes"
+    echo "  -h, --help      Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  wt-remove BrainstormAI-feature-auth"
+    echo "  wt-remove MyProject-hotfix --keep-branch"
+    echo "  wt-remove MyProject-temp --force"
+    exit 1
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    exit 1
+fi
+
+# Parse arguments
+WORKTREE_NAME=""
+KEEP_BRANCH=false
+FORCE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --keep-branch)
+            KEEP_BRANCH=true
+            shift
+            ;;
+        --force)
+            FORCE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            usage
+            ;;
+        *)
+            if [ -z "$WORKTREE_NAME" ]; then
+                WORKTREE_NAME="$1"
+            else
+                echo "Error: Too many arguments"
+                usage
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Check if worktree name is provided
+if [ -z "$WORKTREE_NAME" ]; then
+    echo "Error: Worktree name is required"
+    usage
+fi
+
+# Get project name and parent directory
+PROJECT_NAME=$(basename "$(git rev-parse --show-toplevel)")
+PARENT_DIR=$(dirname "$(git rev-parse --show-toplevel)")
+WORKTREE_PATH="${PARENT_DIR}/${WORKTREE_NAME}"
+
+# Find the actual worktree path by matching the name
+ACTUAL_WORKTREE_PATH=$(git worktree list | grep -E "/${WORKTREE_NAME}\s+" | awk '{print $1}' | head -1)
+
+if [ -z "$ACTUAL_WORKTREE_PATH" ]; then
+    echo "Error: Worktree '${WORKTREE_NAME}' not found"
+    echo ""
+    echo "Available worktrees:"
+    git worktree list | while read -r path branch commit; do
+        name=$(basename "$path")
+        echo "  - $name"
+    done
+    exit 1
+fi
+
+# Use the actual path instead of the constructed one
+WORKTREE_PATH="$ACTUAL_WORKTREE_PATH"
+
+# Check if it's the main worktree
+MAIN_WORKTREE=$(git rev-parse --show-toplevel)
+if [ "$WORKTREE_PATH" = "$MAIN_WORKTREE" ]; then
+    echo "Error: Cannot remove the main worktree"
+    exit 1
+fi
+
+# Get the branch name for this worktree
+BRANCH_NAME=$(git worktree list --porcelain | grep -A 1 "worktree $WORKTREE_PATH" | grep "branch" | sed 's/branch refs\/heads\///')
+
+# Ensure we have the latest changes from remote
+echo "Pulling latest changes..."
+git pull --quiet || echo "Warning: Could not pull latest changes (might be offline or no remote)"
+
+echo "Removing worktree:"
+echo "  Name: ${WORKTREE_NAME}"
+echo "  Path: ${WORKTREE_PATH}"
+echo "  Branch: ${BRANCH_NAME}"
+
+# Check for uncommitted changes unless force is used
+if [ "$FORCE" = false ] && [ -d "$WORKTREE_PATH" ]; then
+    cd "$WORKTREE_PATH"
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        echo ""
+        echo "⚠️  Warning: Worktree has uncommitted changes!"
+        echo "Files with changes:"
+        git status --porcelain
+        echo ""
+        echo "Use --force to remove anyway, or commit/stash changes first."
+        exit 1
+    fi
+    cd - > /dev/null
+fi
+
+# Look up DerivedData path before removing worktree (since we need the project files)
+echo ""
+echo "🔍 Checking for DerivedData to cleanup..."
+
+DERIVED_DATA_PATH=$(wt-find-deriveddata "$WORKTREE_NAME" 2>/dev/null)
+if [ -n "$DERIVED_DATA_PATH" ] && [ -d "$DERIVED_DATA_PATH" ]; then
+    DERIVED_DATA_SIZE=$(du -sh "$DERIVED_DATA_PATH" 2>/dev/null | cut -f1 || echo "unknown")
+    echo "Found DerivedData folder: $(basename "$DERIVED_DATA_PATH") ($DERIVED_DATA_SIZE)"
+else
+    DERIVED_DATA_PATH=""
+    echo "ℹ️  No Xcode project found or no DerivedData to cleanup"
+fi
+
+# Confirm removal unless force is used
+if [ "$FORCE" = false ]; then
+    echo ""
+    read -p "Are you sure you want to remove this worktree? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+fi
+
+# Remove the worktree
+echo ""
+echo "Removing worktree..."
+if [ "$FORCE" = true ]; then
+    git worktree remove --force "$WORKTREE_PATH"
+else
+    git worktree remove "$WORKTREE_PATH"
+fi
+
+echo "✅ Worktree removed successfully!"
+
+
+# Handle branch deletion
+if [ "$KEEP_BRANCH" = false ] && [ -n "$BRANCH_NAME" ]; then
+    echo ""
+    echo "Deleting branch '${BRANCH_NAME}'..."
+    
+    # Check if branch has been merged
+    if git merge-base --is-ancestor "$BRANCH_NAME" HEAD 2>/dev/null; then
+        git branch -d "$BRANCH_NAME"
+        echo "✅ Branch '${BRANCH_NAME}' deleted successfully!"
+    else
+        echo "⚠️  Branch '${BRANCH_NAME}' has unmerged changes."
+        if [ "$FORCE" = true ]; then
+            git branch -D "$BRANCH_NAME"
+            echo "✅ Branch '${BRANCH_NAME}' force-deleted!"
+        else
+            read -p "Force delete unmerged branch? (y/N): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                git branch -D "$BRANCH_NAME"
+                echo "✅ Branch '${BRANCH_NAME}' force-deleted!"
+            else
+                echo "Branch '${BRANCH_NAME}' kept. Use 'git branch -D ${BRANCH_NAME}' to delete manually."
+            fi
+        fi
+    fi
+else
+    if [ "$KEEP_BRANCH" = true ]; then
+        echo "✅ Branch '${BRANCH_NAME}' kept as requested."
+    fi
+fi
+
+# Clean up DerivedData if we found one earlier
+if [ -n "$DERIVED_DATA_PATH" ] && [ -d "$DERIVED_DATA_PATH" ]; then
+    echo ""
+    echo "🧹 Cleaning up DerivedData..."
+    echo "Folder: $(basename "$DERIVED_DATA_PATH")"
+    echo "Size: $DERIVED_DATA_SIZE"
+    
+    if [ "$FORCE" = false ]; then
+        read -p "Remove DerivedData folder? (Y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            echo "DerivedData kept."
+        else
+            echo "Removing DerivedData..."
+            rm -rf "$DERIVED_DATA_PATH"
+            echo "✅ DerivedData cleaned up! ($DERIVED_DATA_SIZE freed)"
+        fi
+    else
+        echo "Removing DerivedData..."
+        rm -rf "$DERIVED_DATA_PATH"
+        echo "✅ DerivedData cleaned up! ($DERIVED_DATA_SIZE freed)"
+    fi
+fi
+
+echo ""
+echo "🎉 Cleanup complete!"
