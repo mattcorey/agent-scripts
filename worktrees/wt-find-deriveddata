@@ -117,31 +117,50 @@ if [ "$VERBOSE" = true ]; then
     echo "Searching for Xcode project files in: $TARGET_PATH" >&2
 fi
 
-# Check for workspace files first (use find to avoid issues with shell expansion)
-WORKSPACE_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
-if [ -n "$WORKSPACE_FILES" ]; then
-    PROJECT_FILE=$(echo "$WORKSPACE_FILES" | head -1)
-    PROJECT_TYPE="-workspace"
+# Check for Swift Package first
+if [ -f "$TARGET_PATH/Package.swift" ]; then
+    PROJECT_FILE="$TARGET_PATH/Package.swift"
+    PROJECT_TYPE="-package"
     if [ "$VERBOSE" = true ]; then
-        echo "Found workspace: $(basename "$PROJECT_FILE")" >&2
+        echo "Found Swift Package: Package.swift" >&2
     fi
 else
-    # Check for project files
-    PROJECT_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null)
-    if [ -n "$PROJECT_FILES" ]; then
-        PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
-        PROJECT_TYPE="-project"
+    # Check for workspace files (use find to avoid issues with shell expansion)
+    WORKSPACE_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
+    if [ -n "$WORKSPACE_FILES" ]; then
+        PROJECT_FILE=$(echo "$WORKSPACE_FILES" | head -1)
+        PROJECT_TYPE="-workspace"
         if [ "$VERBOSE" = true ]; then
-            echo "Found project: $(basename "$PROJECT_FILE")" >&2
+            echo "Found workspace: $(basename "$PROJECT_FILE")" >&2
         fi
     else
-        echo "Error: No Xcode project (.xcodeproj) or workspace (.xcworkspace) found in: $TARGET_PATH" >&2
-        exit 1
+        # Check for project files
+        PROJECT_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null)
+        if [ -n "$PROJECT_FILES" ]; then
+            PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
+            PROJECT_TYPE="-project"
+            if [ "$VERBOSE" = true ]; then
+                echo "Found project: $(basename "$PROJECT_FILE")" >&2
+            fi
+        else
+            echo "Error: No Swift Package (Package.swift), Xcode project (.xcodeproj) or workspace (.xcworkspace) found in: $TARGET_PATH" >&2
+            exit 1
+        fi
     fi
 fi
 
-# Extract project name from file (remove path and extension)
-PROJECT_NAME=$(basename "$PROJECT_FILE" | sed -E 's/\.(xcworkspace|xcodeproj)$//')
+# Extract project name from file
+if [ "$PROJECT_TYPE" = "-package" ]; then
+    # For Swift packages, extract the name from Package.swift
+    PROJECT_NAME=$(grep -E '^\s*name:' "$PROJECT_FILE" | head -1 | sed -E 's/.*name:\s*"([^"]+)".*/\1/')
+    if [ -z "$PROJECT_NAME" ]; then
+        # Fallback to directory name if we can't parse the name
+        PROJECT_NAME=$(basename "$TARGET_PATH")
+    fi
+else
+    # For projects/workspaces, remove path and extension
+    PROJECT_NAME=$(basename "$PROJECT_FILE" | sed -E 's/\.(xcworkspace|xcodeproj)$//')
+fi
 
 if [ "$VERBOSE" = true ]; then
     echo "Project name: $PROJECT_NAME" >&2
@@ -155,20 +174,53 @@ if [ "$VERBOSE" = true ]; then
 fi
 
 # Try to get list of available schemes
-AVAILABLE_SCHEMES=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -list 2>/dev/null | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | grep -v '^$')
+if [ "$PROJECT_TYPE" = "-package" ]; then
+    # For Swift packages, we need to run from the package directory
+    AVAILABLE_SCHEMES=$(cd "$TARGET_PATH" && xcodebuild -list 2>/dev/null | awk '/Schemes:/ {p=1; next} p && NF && !/^$/ {print $0} /^$/ && p {p=0}' | sed 's/^[[:space:]]*//')
+else
+    AVAILABLE_SCHEMES=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -list 2>/dev/null | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | grep -v '^$')
+fi
 
 if [ -n "$AVAILABLE_SCHEMES" ]; then
-    # Check if our assumed scheme (project name) exists in the list
-    if echo "$AVAILABLE_SCHEMES" | grep -q "^$PROJECT_NAME$"; then
-        SCHEME="$PROJECT_NAME"
-        if [ "$VERBOSE" = true ]; then
-            echo "Using scheme: $SCHEME (matches project name)" >&2
+    if [ "$PROJECT_TYPE" = "-package" ]; then
+        # For Swift packages, try multiple strategies to find the right scheme
+        
+        # Strategy 1: Look for scheme ending in "-Package"
+        PACKAGE_SCHEME=$(echo "$AVAILABLE_SCHEMES" | grep -E "\-Package$" | head -1)
+        
+        # Strategy 2: Look for scheme matching the project name
+        PROJECT_SCHEME=$(echo "$AVAILABLE_SCHEMES" | grep -E "^$PROJECT_NAME$" | head -1)
+        
+        if [ -n "$PACKAGE_SCHEME" ]; then
+            SCHEME="$PACKAGE_SCHEME"
+            if [ "$VERBOSE" = true ]; then
+                echo "Using Swift Package scheme ending in -Package: $SCHEME" >&2
+            fi
+        elif [ -n "$PROJECT_SCHEME" ]; then
+            SCHEME="$PROJECT_SCHEME"
+            if [ "$VERBOSE" = true ]; then
+                echo "Using Swift Package scheme matching project name: $SCHEME" >&2
+            fi
+        else
+            # Fallback to first available scheme
+            SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
+            if [ "$VERBOSE" = true ]; then
+                echo "Using first available Swift Package scheme: $SCHEME" >&2
+            fi
         fi
     else
-        # Use the first available scheme
-        SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
-        if [ "$VERBOSE" = true ]; then
-            echo "Project name scheme not found, using first available scheme: $SCHEME" >&2
+        # For regular projects/workspaces, check if our assumed scheme (project name) exists in the list
+        if echo "$AVAILABLE_SCHEMES" | grep -q "^$PROJECT_NAME$"; then
+            SCHEME="$PROJECT_NAME"
+            if [ "$VERBOSE" = true ]; then
+                echo "Using scheme: $SCHEME (matches project name)" >&2
+            fi
+        else
+            # Use the first available scheme
+            SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
+            if [ "$VERBOSE" = true ]; then
+                echo "Project name scheme not found, using first available scheme: $SCHEME" >&2
+            fi
         fi
     fi
 else
@@ -187,18 +239,51 @@ DESTINATION="platform=iOS Simulator,OS=26.0,name=iPad Pro 11-inch (M4)"
 
 if [ "$VERBOSE" = true ]; then
     echo "Getting DerivedData path using xcodebuild..." >&2
-    echo "Command: xcodebuild $PROJECT_TYPE \"$PROJECT_FILE\" -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
+    if [ "$PROJECT_TYPE" = "-package" ]; then
+        echo "Working directory: $TARGET_PATH" >&2
+        echo "Command: xcodebuild -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
+    else
+        echo "Command: xcodebuild $PROJECT_TYPE \"$PROJECT_FILE\" -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
+    fi
 fi
 
 # Get the DerivedData path using xcodebuild -showBuildSettings
-BUILD_DIR=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
+if [ "$PROJECT_TYPE" = "-package" ]; then
+    # For Swift packages, run xcodebuild from the package directory without project/workspace flags
+    ORIGINAL_DIR=$(pwd)
+    cd "$TARGET_PATH"
+    
+    if [ "$VERBOSE" = true ]; then
+        echo "Resolving Swift Package dependencies..." >&2
+    fi
+    
+    # First try to resolve dependencies (ignore errors as it might already be resolved)
+    xcodebuild -resolvePackageDependencies 2>/dev/null || true
+    
+    # Now get build settings
+    BUILD_DIR=$(xcodebuild -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
+    cd "$ORIGINAL_DIR"
+else
+    BUILD_DIR=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
+fi
 
 if [ -z "$BUILD_DIR" ]; then
     echo "Error: Could not determine build directory using xcodebuild" >&2
     echo "This might happen if:" >&2
     echo "  - The scheme '$SCHEME' is invalid" >&2
-    echo "  - The project has configuration issues" >&2
+    if [ "$PROJECT_TYPE" = "-package" ]; then
+        echo "  - Swift Package dependencies could not be resolved" >&2
+        echo "  - The Package.swift file has configuration issues" >&2
+        echo "  - Try running 'swift package resolve' in the package directory first" >&2
+    else
+        echo "  - The project has configuration issues" >&2
+    fi
     echo "  - Xcode command line tools are not properly installed" >&2
+    if [ "$VERBOSE" = true ]; then
+        echo "" >&2
+        echo "Available schemes found:" >&2
+        echo "$AVAILABLE_SCHEMES" >&2
+    fi
     exit 1
 fi
 

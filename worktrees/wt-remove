@@ -132,13 +132,39 @@ fi
 echo ""
 echo "🔍 Checking for DerivedData to cleanup..."
 
-DERIVED_DATA_PATH=$(wt-find-deriveddata "$WORKTREE_NAME" 2>/dev/null)
-if [ -n "$DERIVED_DATA_PATH" ] && [ -d "$DERIVED_DATA_PATH" ]; then
+# Temporarily disable set -e to handle errors gracefully
+set +e
+DERIVED_DATA_OUTPUT=$(wt-find-deriveddata "$WORKTREE_NAME" 2>&1)
+FIND_EXIT_CODE=$?
+set -e
+
+if [ $FIND_EXIT_CODE -eq 0 ] && [ -n "$DERIVED_DATA_OUTPUT" ] && [ -d "$DERIVED_DATA_OUTPUT" ]; then
+    # Success case - DerivedData found
+    DERIVED_DATA_PATH="$DERIVED_DATA_OUTPUT"
     DERIVED_DATA_SIZE=$(du -sh "$DERIVED_DATA_PATH" 2>/dev/null | cut -f1 || echo "unknown")
     echo "Found DerivedData folder: $(basename "$DERIVED_DATA_PATH") ($DERIVED_DATA_SIZE)"
-else
+elif [ $FIND_EXIT_CODE -eq 0 ]; then
+    # Command succeeded but no DerivedData found
     DERIVED_DATA_PATH=""
     echo "ℹ️  No Xcode project found or no DerivedData to cleanup"
+else
+    # Command failed - show warning and ask user
+    DERIVED_DATA_PATH=""
+    echo "⚠️  Warning: Failed to check for DerivedData"
+    echo "Error details: $DERIVED_DATA_OUTPUT"
+    echo ""
+    
+    if [ "$FORCE" = false ]; then
+        read -p "Continue with worktree removal anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Cancelled."
+            exit 0
+        fi
+        echo "Continuing without DerivedData cleanup..."
+    else
+        echo "Force mode enabled - continuing without DerivedData cleanup..."
+    fi
 fi
 
 # Confirm removal unless force is used
