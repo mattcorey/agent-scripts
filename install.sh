@@ -143,19 +143,76 @@ for script in "${SCRIPTS[@]}"; do
     fi
 done
 
+# Install Claude agents
+CLAUDE_AGENTS_DIR="$HOME/.claude/agents"
+AGENTS_INSTALLED=0
+AGENTS_SKIPPED=0
+
+if [ "$UNINSTALL" = true ]; then
+    # Uninstall Claude agents
+    if [ -d "$CLAUDE_AGENTS_DIR" ]; then
+        print_color $GREEN "Removing Claude agent links..."
+        for agent_file in "$SCRIPT_DIR/claude-agents"/*.md; do
+            if [ -f "$agent_file" ]; then
+                agent_name=$(basename "$agent_file")
+                link_path="$CLAUDE_AGENTS_DIR/$agent_name"
+                if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$agent_file" ]; then
+                    rm "$link_path"
+                    print_color $GREEN "  ✓ Removed agent: $agent_name"
+                    ((AGENTS_INSTALLED++))
+                else
+                    print_color $YELLOW "  - Skipped agent: $agent_name (not installed)"
+                    ((AGENTS_SKIPPED++))
+                fi
+            fi
+        done
+    fi
+else
+    # Install Claude agents
+    print_color $GREEN "Installing Claude agents..."
+    mkdir -p "$CLAUDE_AGENTS_DIR"
+    
+    for agent_file in "$SCRIPT_DIR/claude-agents"/*.md; do
+        if [ -f "$agent_file" ]; then
+            agent_name=$(basename "$agent_file")
+            link_path="$CLAUDE_AGENTS_DIR/$agent_name"
+            
+            if [ -e "$link_path" ]; then
+                if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$agent_file" ]; then
+                    print_color $YELLOW "  - Skipped agent: $agent_name (already installed)"
+                    ((AGENTS_SKIPPED++))
+                else
+                    print_color $YELLOW "  ⚠ Skipped agent: $agent_name (file exists)"
+                    ((AGENTS_SKIPPED++))
+                fi
+            else
+                ln -s "$agent_file" "$link_path"
+                print_color $GREEN "  ✓ Installed agent: $agent_name"
+                ((AGENTS_INSTALLED++))
+            fi
+        fi
+    done
+fi
+
 # Print summary
 echo ""
 if [ "$UNINSTALL" = true ]; then
     print_color $GREEN "Uninstallation complete!"
     print_color $GREEN "  Removed: $INSTALLED scripts"
-    if [ $SKIPPED -gt 0 ]; then
-        print_color $YELLOW "  Skipped: $SKIPPED scripts"
+    if [ $AGENTS_INSTALLED -gt 0 ]; then
+        print_color $GREEN "  Removed: $AGENTS_INSTALLED Claude agents"
+    fi
+    if [ $SKIPPED -gt 0 ] || [ $AGENTS_SKIPPED -gt 0 ]; then
+        print_color $YELLOW "  Skipped: $((SKIPPED + AGENTS_SKIPPED)) items"
     fi
 else
     print_color $GREEN "Installation complete!"
     print_color $GREEN "  Installed: $INSTALLED scripts"
-    if [ $SKIPPED -gt 0 ]; then
-        print_color $YELLOW "  Skipped: $SKIPPED scripts"
+    if [ $AGENTS_INSTALLED -gt 0 ]; then
+        print_color $GREEN "  Installed: $AGENTS_INSTALLED Claude agents"
+    fi
+    if [ $SKIPPED -gt 0 ] || [ $AGENTS_SKIPPED -gt 0 ]; then
+        print_color $YELLOW "  Skipped: $((SKIPPED + AGENTS_SKIPPED)) items"
     fi
     if [ $FAILED -gt 0 ]; then
         print_color $RED "  Failed: $FAILED scripts"
@@ -169,6 +226,20 @@ else
             link_path="$INSTALL_DIR/$script_name"
             if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$script" ]; then
                 echo "  - $script_name"
+            fi
+        done
+    fi
+    
+    if [ $AGENTS_INSTALLED -gt 0 ]; then
+        echo ""
+        print_color $GREEN "Claude agents are now available globally:"
+        for agent_file in "$SCRIPT_DIR/claude-agents"/*.md; do
+            if [ -f "$agent_file" ]; then
+                agent_name=$(basename "$agent_file" .md)
+                link_path="$CLAUDE_AGENTS_DIR/$(basename "$agent_file")"
+                if [ -L "$link_path" ] && [ "$(readlink "$link_path")" = "$agent_file" ]; then
+                    echo "  - $agent_name"
+                fi
             fi
         done
     fi

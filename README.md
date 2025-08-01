@@ -14,6 +14,19 @@ This will create symbolic links in your PATH so you can run the scripts from any
 
 ## Scripts by Category
 
+### claude-agents/
+
+Claude Code subagent definitions that can be referenced globally after installation.
+
+These agents extend Claude Code's capabilities with specialized knowledge and toolsets for specific tasks.
+
+**Available Agents:**
+- `code-refactoring-architect` - Specialized in analyzing and refactoring code structure, identifying architectural issues
+- `swiftui-architecture-specialist` - Expert in SwiftUI architecture, iOS development, and modern iOS features
+
+**Usage:**
+After installation, these agents are available globally in any Claude Code session via the Task tool.
+
 ### worktrees/
 
 Git worktree management utilities for working with multiple branches simultaneously.
