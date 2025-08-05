@@ -1,0 +1,558 @@
+#!/bin/bash
+
+set -e
+
+# Default values
+PLATFORM="iOS"
+VERSION="26.0"
+SCHEME=""
+DEVICE="iPhone 16"
+TEST_CLASS=""
+SPECIFIC_TEST=""
+VERBOSE=false
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Help function
+show_help() {
+    cat << EOF
+xc-test - Simplified Xcode test runner with clear results
+
+Usage: xc-test [OPTIONS]
+
+Options:
+  -p, --platform <platform>    Platform (iOS, macOS, visionOS) [default: iOS]
+  -v, --version <version>      OS version (e.g., 26.0, 18.3.1) [default: 26.0]
+  -s, --scheme <scheme>        Specific scheme to test
+  -d, --device <device>        Device name (e.g., "iPhone 16", "iPad Pro") [default: iPhone 16]
+  -c, --class <class>          Run specific test class (e.g., "MyAppTests.LoginTests")
+  -t, --test <test>            Run specific test (e.g., "MyAppTests.LoginTests/testLogin")
+  -h, --help                   Show this help message
+  --verbose                    Show full xcodebuild output
+
+Examples:
+  xc-test                      # Run all tests with defaults
+  xc-test -p macOS             # Run tests on macOS
+  xc-test -d "iPad Pro"        # Run tests on iPad Pro simulator
+  xc-test -c "MyAppTests.NetworkTests"  # Run specific test class
+  xc-test -t "MyAppTests.NetworkTests/testAPICall"  # Run specific test
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--platform)
+            PLATFORM="$2"
+            shift 2
+            ;;
+        -v|--version)
+            VERSION="$2"
+            shift 2
+            ;;
+        -s|--scheme)
+            SCHEME="$2"
+            shift 2
+            ;;
+        -d|--device)
+            DEVICE="$2"
+            shift 2
+            ;;
+        -c|--class)
+            TEST_CLASS="$2"
+            shift 2
+            ;;
+        -t|--test)
+            SPECIFIC_TEST="$2"
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Find project or workspace
+PROJECT=""
+WORKSPACE=""
+
+WORKSPACE_FILES=$(find . -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
+if [ -n "$WORKSPACE_FILES" ]; then
+    WORKSPACE=$(echo "$WORKSPACE_FILES" | head -1 | sed 's|^\./||')
+    echo "Found workspace: $WORKSPACE"
+elif find . -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null | head -1 > /dev/null; then
+    PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null | head -1 | sed 's|^\./||')
+    echo "Found project: $PROJECT"
+else
+    echo -e "${RED}Error: No Xcode project or workspace found in current directory${NC}"
+    echo "Current directory contents:"
+    ls -la
+    exit 1
+fi
+
+# Build the -project or -workspace argument
+if [ -n "$WORKSPACE" ]; then
+    PROJECT_ARG="-workspace $WORKSPACE"
+    echo "Using workspace: $WORKSPACE"
+else
+    PROJECT_ARG="-project $PROJECT"
+    echo "Using project: $PROJECT"
+fi
+
+# Get available schemes if not specified
+if [ -z "$SCHEME" ]; then
+    echo "Detecting schemes..."
+    
+    # First, let's get the raw output for debugging
+    XCODE_LIST_OUTPUT=$(xcodebuild $PROJECT_ARG -list 2>/dev/null)
+    
+    # Try different approaches to extract schemes
+    SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}' | head -1)
+    
+    # If that doesn't work, try a simpler approach
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//' | head -1)
+    fi
+    
+    # If still empty, try to get any scheme
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | head -1)
+    fi
+    
+    if [ -z "$SCHEMES" ]; then
+        echo -e "${RED}Error: No schemes found${NC}"
+        echo "Debug: xcodebuild -list output:"
+        echo "$XCODE_LIST_OUTPUT"
+        exit 1
+    fi
+    SCHEME=$SCHEMES
+fi
+
+echo "Using scheme: $SCHEME"
+
+# Set destination based on platform
+case $PLATFORM in
+    iOS)
+        # Try to find the exact device if available
+        DEVICE_ID=$(xcrun simctl list devices available | grep -E "$DEVICE.*iOS $VERSION" | head -1 | sed -E 's/.*\(([A-Z0-9-]+)\).*/\1/')
+        if [ -z "$DEVICE_ID" ]; then
+            # Fallback to generic destination
+            DESTINATION="platform=iOS Simulator,OS=$VERSION,name=$DEVICE"
+        else
+            DESTINATION="platform=iOS Simulator,id=$DEVICE_ID"
+        fi
+        ;;
+    macOS)
+        DESTINATION="platform=macOS"
+        ;;
+    visionOS)
+        DESTINATION="platform=visionOS Simulator,OS=$VERSION"
+        ;;
+    *)
+        echo -e "${RED}Error: Unknown platform $PLATFORM${NC}"
+        exit 1
+        ;;
+esac
+
+# Build test arguments
+TEST_ARGS=""
+if [ -n "$SPECIFIC_TEST" ]; then
+    TEST_ARGS="-only-testing:$SPECIFIC_TEST"
+elif [ -n "$TEST_CLASS" ]; then
+    TEST_ARGS="-only-testing:$TEST_CLASS"
+fi
+
+# Create temp file for output and result bundle
+TEMP_OUTPUT=$(mktemp)
+RESULT_BUNDLE=$(mktemp -d)/test_results.xcresult
+trap "rm -f $TEMP_OUTPUT; rm -rf $RESULT_BUNDLE" EXIT
+
+# Show progress
+echo ""
+if [ -n "$SPECIFIC_TEST" ]; then
+    echo "Running test: $SPECIFIC_TEST on $DEVICE ($PLATFORM $VERSION)..."
+elif [ -n "$TEST_CLASS" ]; then
+    echo "Running test class: $TEST_CLASS on $DEVICE ($PLATFORM $VERSION)..."
+else
+    echo "Running all tests on $DEVICE ($PLATFORM $VERSION)..."
+fi
+
+# Run xcodebuild test
+if [ "$VERBOSE" = true ]; then
+    xcodebuild $PROJECT_ARG \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration Debug \
+        -resultBundlePath "$RESULT_BUNDLE" \
+        test $TEST_ARGS 2>&1 | tee "$TEMP_OUTPUT"
+    TEST_RESULT=${PIPESTATUS[0]}
+else
+    # Show spinner while testing
+    (
+        trap 'exit 0' TERM
+        while true; do
+            for s in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do
+                printf "\rTesting... %s" "$s"
+                sleep 0.1
+            done
+        done
+    ) &
+    SPINNER_PID=$!
+    
+    # Set up trap to ensure spinner is killed on script exit
+    trap 'kill $SPINNER_PID 2>/dev/null; wait $SPINNER_PID 2>/dev/null; printf "\r                    \r"' EXIT
+    
+    set +e  # Temporarily disable exit on error for xcodebuild
+    xcodebuild $PROJECT_ARG \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration Debug \
+        -resultBundlePath "$RESULT_BUNDLE" \
+        test $TEST_ARGS > "$TEMP_OUTPUT" 2>&1
+    TEST_RESULT=$?
+    set -e  # Re-enable exit on error
+    
+    # Kill the spinner
+    kill $SPINNER_PID 2>/dev/null
+    wait $SPINNER_PID 2>/dev/null
+    printf "\r                    \r"
+fi
+
+# Parse build errors
+BUILD_ERRORS=$(grep -E "^[^:]+:[0-9]+:[0-9]+: error:" "$TEMP_OUTPUT" | head -20)
+if [ -n "$BUILD_ERRORS" ]; then
+    BUILD_ERROR_COUNT=$(echo "$BUILD_ERRORS" | wc -l | tr -d ' ')
+else
+    BUILD_ERROR_COUNT=0
+fi
+
+# Parse test results using xcresulttool if result bundle exists
+if [ -d "$RESULT_BUNDLE" ]; then
+    echo "Parsing test results from result bundle..."
+    
+    # Get test results summary as JSON
+    TEST_RESULTS_JSON=$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json 2>/dev/null || echo "{}")
+    
+    # Extract test counts from JSON
+    if command -v jq >/dev/null 2>&1; then
+        # Try top-level fields first (per documented schema)
+        PASSED_TESTS=$(echo "$TEST_RESULTS_JSON" | jq -r '.passedTests // 0' 2>/dev/null || echo "0")
+        FAILED_TESTS=$(echo "$TEST_RESULTS_JSON" | jq -r '.failedTests // 0' 2>/dev/null || echo "0")
+        TOTAL_TESTS=$(echo "$TEST_RESULTS_JSON" | jq -r '.totalTestCount // 0' 2>/dev/null || echo "0")
+        
+        # If top-level fields are zero/empty, try devicesAndConfigurations array (actual format observed)
+        if [ "$PASSED_TESTS" = "0" ] && [ "$FAILED_TESTS" = "0" ] && [ "$TOTAL_TESTS" = "0" ]; then
+            PASSED_TESTS=$(echo "$TEST_RESULTS_JSON" | jq -r '[.devicesAndConfigurations[]?.passedTests // 0] | add' 2>/dev/null || echo "0")
+            FAILED_TESTS=$(echo "$TEST_RESULTS_JSON" | jq -r '[.devicesAndConfigurations[]?.failedTests // 0] | add' 2>/dev/null || echo "0")
+            TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS))
+        fi
+    else
+        # Try top-level fields first
+        PASSED_TESTS=$(echo "$TEST_RESULTS_JSON" | grep -o '"passedTests"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' | head -1 || echo "0")
+        FAILED_TESTS=$(echo "$TEST_RESULTS_JSON" | grep -o '"failedTests"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' | head -1 || echo "0")  
+        TOTAL_TESTS=$(echo "$TEST_RESULTS_JSON" | grep -o '"totalTestCount"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' | head -1 || echo "0")
+        
+        # If empty, calculate total
+        if [ "$TOTAL_TESTS" = "0" ]; then
+            TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS))
+        fi
+    fi
+else
+    echo "Result bundle not found, falling back to text parsing..."
+    # Fallback to old text parsing method
+    PASSED_TESTS=$(grep -c "Test case.*passed" "$TEMP_OUTPUT" 2>/dev/null | head -1)
+    FAILED_TESTS=$(grep -c "Test case.*failed" "$TEMP_OUTPUT" 2>/dev/null | head -1)
+    TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS))
+fi
+
+# Ensure variables are clean integers
+PASSED_TESTS=${PASSED_TESTS:-0}
+FAILED_TESTS=${FAILED_TESTS:-0}
+TOTAL_TESTS=${TOTAL_TESTS:-0}
+BUILD_ERROR_COUNT=${BUILD_ERROR_COUNT:-0}
+
+# Remove any whitespace/newlines
+PASSED_TESTS=$(echo "$PASSED_TESTS" | tr -d '\n\r ')
+FAILED_TESTS=$(echo "$FAILED_TESTS" | tr -d '\n\r ')
+TOTAL_TESTS=$(echo "$TOTAL_TESTS" | tr -d '\n\r ')
+BUILD_ERROR_COUNT=$(echo "$BUILD_ERROR_COUNT" | tr -d '\n\r ')
+
+# Check for crashes and fatal errors
+CRASH_DETECTED=false
+FATAL_ERROR_LINE=""
+
+# Enhanced crash detection using both JSON and text analysis
+if [ -d "$RESULT_BUNDLE" ]; then
+    
+    # First check for explicit crash indicators in the test output
+    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+    elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)
+    elif grep -E "Thread [0-9]+ Crashed|signal SIGABRT|signal SIGSEGV" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -E "Thread [0-9]+ Crashed|signal SIGABRT|signal SIGSEGV" "$TEMP_OUTPUT" | head -1)
+    else
+        # Check for crash pattern: if we have many failed tests, check their durations
+        if [ "$FAILED_TESTS" -gt 20 ] && [ "$TOTAL_TESTS" -gt 0 ]; then
+            # Use text-based analysis to see if failures have 0.000 duration (crash pattern)
+            ZERO_DURATION_FAILURES=$(grep -c "failed.*0\.000 seconds" "$TEMP_OUTPUT" || echo "0")
+            NONZERO_DURATION_FAILURES=$(grep -c "failed.*([1-9][0-9]*\.[0-9]* seconds)" "$TEMP_OUTPUT" 2>/dev/null || echo "0")
+            
+            # If most failures are 0.000 seconds, it's likely a crash
+            # Use a lower threshold - if >80% of failures have 0.000 duration, it's a crash
+            if [ "$ZERO_DURATION_FAILURES" -gt 0 ] && [ "$ZERO_DURATION_FAILURES" -gt $((FAILED_TESTS * 8 / 10)) ]; then
+                CRASH_DETECTED=true
+                FATAL_ERROR_LINE="$ZERO_DURATION_FAILURES of $FAILED_TESTS test failures had 0.000 seconds duration (indicates crash during test execution)"
+            fi
+        fi
+    fi
+else
+    # Fallback to old text-based crash detection
+    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+    elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)
+    elif grep -E "Thread [0-9]+ Crashed|signal SIGABRT|signal SIGSEGV" "$TEMP_OUTPUT" > /dev/null; then
+        CRASH_DETECTED=true
+        FATAL_ERROR_LINE=$(grep -E "Thread [0-9]+ Crashed|signal SIGABRT|signal SIGSEGV" "$TEMP_OUTPUT" | head -1)
+    else
+        # Improved duration-based detection
+        ZERO_DURATION_FAILURES=$(grep -c "failed.*0\.000 seconds" "$TEMP_OUTPUT" || echo "0")
+        NONZERO_DURATION_FAILURES=$(grep -c "failed.*([1-9][0-9]*\.[0-9]* seconds)" "$TEMP_OUTPUT" 2>/dev/null || echo "0")
+        
+        # If many failures have 0.000 duration and few have real duration, it's likely a crash
+        if [ "$ZERO_DURATION_FAILURES" -gt 20 ] && [ "$ZERO_DURATION_FAILURES" -gt $((NONZERO_DURATION_FAILURES * 4)) ]; then
+            CRASH_DETECTED=true
+            FATAL_ERROR_LINE="$ZERO_DURATION_FAILURES tests failed with 0.000 seconds duration (indicates crash during test execution)"
+        fi
+    fi
+fi
+
+
+# Parse test failures with details
+TEST_FAILURES=""
+if [ "$FAILED_TESTS" -gt 0 ]; then
+    TEST_FAILURES=$(grep -B5 -A10 "Test case.*failed" "$TEMP_OUTPUT" | grep -E "(Test case.*failed|XCTAssert|expected|actual)" | head -40)
+fi
+
+# Display results
+echo ""
+echo "===== TEST RESULTS ====="
+
+# Determine overall status
+if [ "$BUILD_ERROR_COUNT" -gt 0 ]; then
+    STATUS="FAILED"
+    EXIT_CODE=2
+elif [ "$CRASH_DETECTED" = true ]; then
+    STATUS="CRASHED"
+    EXIT_CODE=3
+elif [ "$FAILED_TESTS" -gt 0 ]; then
+    STATUS="FAILED"
+    EXIT_CODE=1
+else
+    STATUS="SUCCESS"
+    EXIT_CODE=0
+fi
+
+if [ "$STATUS" = "SUCCESS" ]; then
+    echo -e "Status: ${GREEN}SUCCESS${NC}"
+elif [ "$STATUS" = "CRASHED" ]; then
+    echo -e "Status: ${RED}CRASHED${NC}"
+else
+    echo -e "Status: ${RED}FAILED${NC}"
+fi
+
+# Show crash information if detected
+if [ "$CRASH_DETECTED" = true ]; then
+    echo ""
+    echo -e "${RED}FATAL ERROR DETECTED:${NC}"
+    echo -e "❌ $FATAL_ERROR_LINE"
+    echo ""
+    echo "⚠️  Tests were terminated due to a crash. Results showing 'failed' tests"
+    echo "   may actually be tests that didn't run due to the crash."
+    echo ""
+fi
+
+# Show build errors if any
+if [ "$BUILD_ERROR_COUNT" -gt 0 ]; then
+    echo ""
+    echo -e "${RED}BUILD ERRORS ($BUILD_ERROR_COUNT):${NC}"
+    while IFS= read -r line; do
+        if [ -n "$line" ]; then
+            file=$(echo "$line" | cut -d: -f1 | xargs basename)
+            linenum=$(echo "$line" | cut -d: -f2)
+            message=$(echo "$line" | cut -d: -f5- | sed 's/^ *//')
+            echo -e "❌ $file:$linenum - $message"
+        fi
+    done <<< "$BUILD_ERRORS"
+fi
+
+# Show test failures if any
+if [ "$FAILED_TESTS" -gt 0 ]; then
+    echo ""
+    echo -e "${RED}TEST FAILURES ($FAILED_TESTS):${NC}"
+    
+    # Extract failed test names and show error details from result bundle if available
+    if [ -d "$RESULT_BUNDLE" ]; then
+        # Try to get detailed test failure information from the result bundle
+        FAILED_TESTS_DETAILS=$(xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json 2>/dev/null || echo "{}")
+        
+        # Parse failed tests and their error messages
+        if command -v jq >/dev/null 2>&1 && [ "$FAILED_TESTS_DETAILS" != "{}" ]; then
+            echo "DEBUG: Attempting to parse test failure details..."
+            
+            # Try to extract failed test cases and their messages directly
+            FAILED_TESTS_INFO=$(echo "$FAILED_TESTS_DETAILS" | jq -r '
+                .testNodes[]? |
+                .. |
+                objects |
+                select(.nodeType? == "Test Case" and .result? == "Failed")
+            ' 2>/dev/null)
+            
+            if [ -n "$FAILED_TESTS_INFO" ]; then
+                echo "$FAILED_TESTS_INFO" | jq -r '. | 
+                    "FAILED_TEST:" + (.nodeIdentifier // .name) + 
+                    (if .children then 
+                        (.children[] | select(.nodeType == "Failure Message") | "\nFAILURE_MSG:" + .name) 
+                     else 
+                        "" 
+                     end)' 2>/dev/null | while IFS= read -r line; do
+                    if [[ "$line" == FAILED_TEST:* ]]; then
+                        test_name=$(echo "$line" | sed 's/^FAILED_TEST://')
+                        clean_name=$(echo "$test_name" | sed 's/.*\///')
+                        echo -e "❌ $clean_name"
+                    elif [[ "$line" == FAILURE_MSG:* ]]; then
+                        message=$(echo "$line" | sed 's/^FAILURE_MSG://')
+                        echo "   → $message"
+                    fi
+                done
+            else
+                echo "DEBUG: No failed test cases found in JSON, using text parsing"
+                # Fallback: Just show test names from text output
+                grep "Test case.*failed" "$TEMP_OUTPUT" | while IFS= read -r line; do
+                    test_name=$(echo "$line" | sed "s/.*Test case '\([^']*\)'.*/\1/")
+                    echo -e "❌ $test_name"
+                done
+            fi
+        else
+            # Fallback: Just show test names from text output
+            grep "Test case.*failed" "$TEMP_OUTPUT" | while IFS= read -r line; do
+                test_name=$(echo "$line" | sed "s/.*Test case '\([^']*\)'.*/\1/")
+                echo -e "❌ $test_name"
+            done
+        fi
+    else
+        # No result bundle, use text parsing
+        grep "Test case.*failed" "$TEMP_OUTPUT" | while IFS= read -r line; do
+            test_name=$(echo "$line" | sed "s/.*Test case '\([^']*\)'.*/\1/")
+            echo -e "❌ $test_name"
+        done
+    fi
+    
+    # Extract unique failed test names and classes for isolation commands
+    # Note: We need to add () to test method names for xcodebuild
+    FAILED_TEST_NAMES=($(grep "Test case.*failed" "$TEMP_OUTPUT" | sed "s/.*Test case '\([^']*\)'.*/\1/" | sed 's/$/()/' | sed 's/()()/()/' | sort -u))
+    
+    # Extract unique test classes (everything before the first '/')
+    FAILED_TEST_CLASSES=($(printf '%s\n' "${FAILED_TEST_NAMES[@]}" | sed 's/\/.*//' | sort -u))
+    
+    # Determine the test target name (usually ends with "Tests")
+    # Try to extract from test output by looking for the app name in the failure messages
+    TEST_TARGET=""
+    # Look for pattern like "Clone 1 of iPhone 16 - AppName (pid)"
+    APP_NAME=$(grep "Test case.*failed" "$TEMP_OUTPUT" | head -1 | sed -n 's/.*- \([^ ]*\) ([0-9]*).*$/\1/p')
+    if [ -n "$APP_NAME" ]; then
+        TEST_TARGET="${APP_NAME}Tests"
+    else
+        # Fallback: Common pattern is ProjectNameTests
+        PROJECT_NAME=$(basename "$(find . -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null | head -1 | sed 's/.xcodeproj$//')")
+        if [ -n "$PROJECT_NAME" ]; then
+            TEST_TARGET="${PROJECT_NAME}Tests"
+        fi
+    fi
+    
+    # Show isolation commands
+    if [ ${#FAILED_TEST_NAMES[@]} -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}🔧 RUN FAILED TESTS IN ISOLATION:${NC}"
+        echo ""
+        
+        # Show individual test commands (limited to first 10 to avoid overwhelming output)
+        echo -e "${YELLOW}Individual tests:${NC}"
+        count=0
+        for test_name in "${FAILED_TEST_NAMES[@]}"; do
+            if [ $count -lt 10 ]; then
+                if [ -n "$TEST_TARGET" ]; then
+                    echo "  xc-test -t \"${TEST_TARGET}/$test_name\""
+                else
+                    echo "  xc-test -t \"$test_name\""
+                fi
+                count=$((count + 1))
+            fi
+        done
+        
+        if [ ${#FAILED_TEST_NAMES[@]} -gt 10 ]; then
+            echo "  ... and $((${#FAILED_TEST_NAMES[@]} - 10)) more individual tests"
+        fi
+        
+        echo ""
+        echo -e "${YELLOW}By test class:${NC}"
+        for class_name in "${FAILED_TEST_CLASSES[@]}"; do
+            if [ -n "$TEST_TARGET" ]; then
+                echo "  xc-test -t \"${TEST_TARGET}/$class_name\""
+            else
+                echo "  xc-test -t \"$class_name\""
+            fi
+        done
+    fi
+fi
+
+# Show summary
+echo ""
+if [ "$TOTAL_TESTS" -gt 0 ]; then
+    if [ "$STATUS" = "SUCCESS" ]; then
+        echo -e "${GREEN}Tests: $PASSED_TESTS passed, $TOTAL_TESTS total${NC}"
+        echo -e "${GREEN}All tests passed!${NC}"
+    elif [ "$STATUS" = "CRASHED" ]; then
+        echo "Tests: $PASSED_TESTS passed before crash, $FAILED_TESTS marked as failed (likely didn't run)"
+        echo -e "${RED}Tests crashed during execution${NC}"
+    else
+        echo "Tests: $PASSED_TESTS passed, $FAILED_TESTS failed, $TOTAL_TESTS total"
+        if [ "$BUILD_ERROR_COUNT" -gt 0 ]; then
+            echo -e "${RED}Build failed with $BUILD_ERROR_COUNT errors${NC}"
+        else
+            echo -e "${RED}Tests failed${NC}"
+        fi
+    fi
+else
+    if [ "$BUILD_ERROR_COUNT" -gt 0 ]; then
+        echo -e "${RED}Build failed with $BUILD_ERROR_COUNT errors${NC}"
+    elif [ "$CRASH_DETECTED" = true ]; then
+        echo -e "${RED}Tests crashed before execution${NC}"
+    else
+        echo "No tests found or executed"
+    fi
+fi
+
+
+exit $EXIT_CODE

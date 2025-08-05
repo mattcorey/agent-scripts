@@ -1,0 +1,282 @@
+#!/bin/bash
+
+set -e
+
+
+# Default values
+PLATFORM="iOS"
+VERSION="26.0"
+SCHEME=""
+VERBOSE=false
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Help function
+show_help() {
+    cat << EOF
+xc-build - Simplified Xcode build with clear error reporting
+
+Usage: xc-build [OPTIONS]
+
+Options:
+  -p, --platform <platform>    Platform (iOS, macOS, visionOS) [default: iOS]
+  -v, --version <version>      OS version (e.g., 26.0, 18.3.1) [default: 26.0]
+  -s, --scheme <scheme>        Specific scheme to build
+  -h, --help                   Show this help message
+  --verbose                    Show full xcodebuild output
+
+Examples:
+  xc-build                     # Build with defaults (iOS 26.0)
+  xc-build -p macOS -v 15.0    # Build for macOS 15.0
+  xc-build -s MyScheme         # Build specific scheme
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--platform)
+            PLATFORM="$2"
+            shift 2
+            ;;
+        -v|--version)
+            VERSION="$2"
+            shift 2
+            ;;
+        -s|--scheme)
+            SCHEME="$2"
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Find project or workspace
+PROJECT=""
+WORKSPACE=""
+
+
+# Check for workspace first
+WORKSPACE_FILES=$(find . -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
+if [ -n "$WORKSPACE_FILES" ]; then
+    WORKSPACE=$(echo "$WORKSPACE_FILES" | head -1 | sed 's|^\./||')
+    echo "Found workspace: $WORKSPACE"
+elif find . -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null | head -1 > /dev/null; then
+    PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null | head -1 | sed 's|^\./||')
+    echo "Found project: $PROJECT"
+else
+    echo -e "${RED}Error: No Xcode project or workspace found in current directory${NC}"
+    echo "Current directory contents:"
+    ls -la
+    exit 1
+fi
+
+# Build the -project or -workspace argument
+if [ -n "$WORKSPACE" ]; then
+    PROJECT_ARG="-workspace $WORKSPACE"
+    echo "Using workspace: $WORKSPACE"
+else
+    PROJECT_ARG="-project $PROJECT"
+    echo "Using project: $PROJECT"
+fi
+
+# Get available schemes if not specified
+if [ -z "$SCHEME" ]; then
+    echo "Detecting schemes..."
+    
+    # First, let's get the raw output for debugging
+    XCODE_LIST_OUTPUT=$(xcodebuild $PROJECT_ARG -list 2>/dev/null)
+    
+    # Try different approaches to extract schemes
+    SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}' | head -1)
+    
+    # If that doesn't work, try a simpler approach
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//' | head -1)
+    fi
+    
+    # If still empty, try to get any scheme
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | head -1)
+    fi
+    
+    if [ -z "$SCHEMES" ]; then
+        echo -e "${RED}Error: No schemes found${NC}"
+        echo ""
+        echo "Debug: Full xcodebuild -list output:"
+        echo "======================================"
+        echo "$XCODE_LIST_OUTPUT"
+        echo "======================================"
+        echo ""
+        echo "Please run 'xcodebuild $PROJECT_ARG -list' manually to see available schemes,"
+        echo "then use: xc-build -s \"YourSchemeName\""
+        exit 1
+    fi
+    SCHEME=$SCHEMES
+fi
+
+echo "Using scheme: $SCHEME"
+
+# Set destination based on platform
+case $PLATFORM in
+    iOS)
+        DESTINATION="platform=iOS Simulator,OS=$VERSION,name=iPhone 16"
+        ;;
+    macOS)
+        DESTINATION="platform=macOS"
+        ;;
+    visionOS)
+        DESTINATION="platform=visionOS Simulator,OS=$VERSION"
+        ;;
+    *)
+        echo -e "${RED}Error: Unknown platform $PLATFORM${NC}"
+        exit 1
+        ;;
+esac
+
+# Create temp file for output
+TEMP_OUTPUT=$(mktemp)
+trap "rm -f $TEMP_OUTPUT" EXIT
+
+# Show progress
+echo ""
+echo "Building for $PLATFORM $VERSION..."
+
+# Run xcodebuild
+if [ "$VERBOSE" = true ]; then
+    xcodebuild $PROJECT_ARG \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration Debug \
+        build 2>&1 | tee "$TEMP_OUTPUT"
+    BUILD_RESULT=${PIPESTATUS[0]}
+else
+    # Show spinner while building
+    (
+        trap 'exit 0' TERM
+        while true; do
+            for s in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do
+                printf "\rBuilding... %s" "$s"
+                sleep 0.1
+            done
+        done
+    ) &
+    SPINNER_PID=$!
+    
+    # Set up trap to ensure spinner is killed on script exit
+    trap 'kill $SPINNER_PID 2>/dev/null; wait $SPINNER_PID 2>/dev/null; printf "\r                    \r"' EXIT
+    
+    set +e  # Temporarily disable exit on error for xcodebuild
+    xcodebuild $PROJECT_ARG \
+        -scheme "$SCHEME" \
+        -destination "$DESTINATION" \
+        -configuration Debug \
+        build > "$TEMP_OUTPUT" 2>&1
+    BUILD_RESULT=$?
+    set -e  # Re-enable exit on error
+    
+    # Kill the spinner
+    kill $SPINNER_PID 2>/dev/null
+    wait $SPINNER_PID 2>/dev/null
+    printf "\r                    \r"
+fi
+
+
+# Parse errors and warnings
+ERRORS=$(grep -E "^[^:]+:[0-9]+:[0-9]+: error:" "$TEMP_OUTPUT" | head -20)
+ERROR_COUNT=$(echo "$ERRORS" | grep -c "error:" || echo "0")
+WARNINGS=$(grep -E "^[^:]+:[0-9]+:[0-9]+: warning:" "$TEMP_OUTPUT" | head -10)
+WARNING_COUNT=$(echo "$WARNINGS" | grep -c "warning:" || echo "0")
+
+# Display results
+echo ""
+echo "===== BUILD RESULTS ====="
+
+if [ $BUILD_RESULT -eq 0 ]; then
+    echo -e "Status: ${GREEN}SUCCESS${NC}"
+    
+    if [ $WARNING_COUNT -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}WARNINGS ($WARNING_COUNT):${NC}"
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                # More robust parsing - handle different xcodebuild output formats
+                if echo "$line" | grep -q ": warning:"; then
+                    # Extract filename, line number, and message more carefully
+                    file_path=$(echo "$line" | sed 's/:.*$//')
+                    file=$(basename "$file_path")
+                    rest=$(echo "$line" | sed 's/^[^:]*://')
+                    linenum=$(echo "$rest" | cut -d: -f1)
+                    message=$(echo "$line" | sed 's/^[^:]*:[^:]*:[^:]*: warning: *//')
+                    echo -e "⚠️  $file:$linenum - $message"
+                else
+                    echo -e "⚠️  $line"
+                fi
+            fi
+        done <<< "$WARNINGS"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}Build succeeded${NC}"
+    
+    if [ $WARNING_COUNT -gt 0 ]; then
+        echo "Build completed with $WARNING_COUNT warnings"
+    fi
+else
+    echo -e "Status: ${RED}FAILED${NC}"
+    
+    if [ $ERROR_COUNT -gt 0 ]; then
+        echo ""
+        echo -e "${RED}ERRORS ($ERROR_COUNT):${NC}"
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                # More robust parsing - handle different xcodebuild output formats
+                if echo "$line" | grep -q ": error:"; then
+                    # Extract filename, line number, and message more carefully
+                    file_path=$(echo "$line" | sed 's/:.*$//')
+                    file=$(basename "$file_path")
+                    rest=$(echo "$line" | sed 's/^[^:]*://')
+                    linenum=$(echo "$rest" | cut -d: -f1)
+                    message=$(echo "$line" | sed 's/^[^:]*:[^:]*:[^:]*: error: *//')
+                    echo -e "❌ $file:$linenum - $message"
+                else
+                    echo -e "❌ $line"
+                fi
+            fi
+        done <<< "$ERRORS"
+    fi
+    
+    echo ""
+    echo -e "${RED}Build failed with $ERROR_COUNT errors${NC}"
+    
+    # Check for other common errors
+    if [ $ERROR_COUNT -eq 0 ]; then
+        if grep -q "Command PhaseScriptExecution failed" "$TEMP_OUTPUT"; then
+            echo "Build script phase failed. Check build phases in Xcode."
+        elif grep -q "No such module" "$TEMP_OUTPUT"; then
+            echo "Missing dependencies. Try running 'pod install' or check Swift Package Manager."
+        elif grep -q "The following build commands failed" "$TEMP_OUTPUT"; then
+            echo "Build command failed. Run with --verbose for details."
+        fi
+    fi
+fi
+
+
+exit $BUILD_RESULT

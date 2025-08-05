@@ -132,8 +132,11 @@ for script in "${SCRIPTS[@]}"; do
                 print_color $YELLOW "  - Skipped: $script_name (already installed)"
                 ((SKIPPED++))
             else
-                print_color $RED "  ✗ Failed: $script_name (file exists at $link_path)"
-                ((FAILED++))
+                # Remove existing file/link and create new link
+                rm -f "$link_path"
+                ln -s "$script" "$link_path"
+                print_color $GREEN "  ✓ Installed: $script_name (overwritten)"
+                ((INSTALLED++))
             fi
         else
             ln -s "$script" "$link_path"
