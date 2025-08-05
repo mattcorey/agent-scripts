@@ -168,21 +168,7 @@ if [ "$VERBOSE" = true ]; then
         build 2>&1 | tee "$TEMP_OUTPUT"
     BUILD_RESULT=${PIPESTATUS[0]}
 else
-    # Show spinner while building
-    (
-        trap 'exit 0' TERM
-        while true; do
-            for s in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do
-                printf "\rBuilding... %s" "$s"
-                sleep 0.1
-            done
-        done
-    ) &
-    SPINNER_PID=$!
-    
-    # Set up trap to ensure spinner is killed on script exit
-    trap 'kill $SPINNER_PID 2>/dev/null; wait $SPINNER_PID 2>/dev/null; printf "\r                    \r"' EXIT
-    
+    echo "Building..."
     set +e  # Temporarily disable exit on error for xcodebuild
     xcodebuild $PROJECT_ARG \
         -scheme "$SCHEME" \
@@ -191,11 +177,6 @@ else
         build > "$TEMP_OUTPUT" 2>&1
     BUILD_RESULT=$?
     set -e  # Re-enable exit on error
-    
-    # Kill the spinner
-    kill $SPINNER_PID 2>/dev/null
-    wait $SPINNER_PID 2>/dev/null
-    printf "\r                    \r"
 fi
 
 

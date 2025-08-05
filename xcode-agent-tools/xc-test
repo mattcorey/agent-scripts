@@ -202,21 +202,7 @@ if [ "$VERBOSE" = true ]; then
         test $TEST_ARGS 2>&1 | tee "$TEMP_OUTPUT"
     TEST_RESULT=${PIPESTATUS[0]}
 else
-    # Show spinner while testing
-    (
-        trap 'exit 0' TERM
-        while true; do
-            for s in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do
-                printf "\rTesting... %s" "$s"
-                sleep 0.1
-            done
-        done
-    ) &
-    SPINNER_PID=$!
-    
-    # Set up trap to ensure spinner is killed on script exit
-    trap 'kill $SPINNER_PID 2>/dev/null; wait $SPINNER_PID 2>/dev/null; printf "\r                    \r"' EXIT
-    
+    echo "Running tests..."
     set +e  # Temporarily disable exit on error for xcodebuild
     xcodebuild $PROJECT_ARG \
         -scheme "$SCHEME" \
@@ -226,11 +212,6 @@ else
         test $TEST_ARGS > "$TEMP_OUTPUT" 2>&1
     TEST_RESULT=$?
     set -e  # Re-enable exit on error
-    
-    # Kill the spinner
-    kill $SPINNER_PID 2>/dev/null
-    wait $SPINNER_PID 2>/dev/null
-    printf "\r                    \r"
 fi
 
 # Parse build errors
