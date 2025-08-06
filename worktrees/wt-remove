@@ -20,7 +20,7 @@ usage() {
     echo "  -h, --help      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  wt-remove BrainstormAI-feature-auth"
+    echo "  wt-remove MyProject-feature-auth"
     echo "  wt-remove MyProject-hotfix --keep-branch"
     echo "  wt-remove MyProject-temp --force"
     exit 1
