@@ -20,7 +20,7 @@ usage() {
     echo "  -h, --help      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  wt-find-deriveddata BrainstormAI-ui-tweaks"
+    echo "  wt-find-deriveddata MyProject-ui-tweaks"
     echo "  wt-find-deriveddata --current"
     echo "  wt-find-deriveddata MyProject-feature --verbose"
     echo ""

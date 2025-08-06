@@ -71,7 +71,7 @@ Removes a worktree and optionally deletes the associated branch.
 
 **Examples:**
 ```bash
-wt-remove BrainstormAI-feature-auth
+wt-remove MyProject-feature-auth
 wt-remove MyProject-hotfix --keep-branch
 wt-remove MyProject-temp --force
 ```
@@ -88,7 +88,7 @@ Finds the DerivedData path for a git worktree containing an Xcode project.
 
 **Examples:**
 ```bash
-wt-find-deriveddata BrainstormAI-ui-tweaks
+wt-find-deriveddata MyProject-ui-tweaks
 wt-find-deriveddata --current
 wt-find-deriveddata MyProject-feature --verbose
 ```
