@@ -90,10 +90,10 @@ fi
 
 # Build the -project or -workspace argument
 if [ -n "$WORKSPACE" ]; then
-    PROJECT_ARG="-workspace $WORKSPACE"
+    PROJECT_ARG="-workspace \"$WORKSPACE\""
     echo "Using workspace: $WORKSPACE"
 else
-    PROJECT_ARG="-project $PROJECT"
+    PROJECT_ARG="-project \"$PROJECT\""
     echo "Using project: $PROJECT"
 fi
 
@@ -102,19 +102,47 @@ if [ -z "$SCHEME" ]; then
     echo "Detecting schemes..."
     
     # First, let's get the raw output for debugging
-    XCODE_LIST_OUTPUT=$(xcodebuild $PROJECT_ARG -list 2>/dev/null)
+    XCODE_LIST_OUTPUT=$(eval "xcodebuild $PROJECT_ARG -list" 2>&1)
+    XCODE_LIST_EXIT_CODE=$?
     
-    # Try different approaches to extract schemes
-    SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}' | head -1)
+    if [ "$VERBOSE" = true ] && [ $XCODE_LIST_EXIT_CODE -ne 0 ]; then
+        echo "Debug: xcodebuild -list failed with exit code: $XCODE_LIST_EXIT_CODE"
+        echo "Debug: Output:"
+        echo "$XCODE_LIST_OUTPUT"
+    fi
+    
+    if [ $XCODE_LIST_EXIT_CODE -ne 0 ]; then
+        echo -e "${RED}Error: xcodebuild -list failed with exit code $XCODE_LIST_EXIT_CODE${NC}"
+        echo "Output:"
+        echo "$XCODE_LIST_OUTPUT"
+        exit 1
+    fi
+    
+    # Get all schemes
+    ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}')
     
     # If that doesn't work, try a simpler approach
-    if [ -z "$SCHEMES" ]; then
-        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//' | head -1)
+    if [ -z "$ALL_SCHEMES" ]; then
+        ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//')
     fi
     
     # If still empty, try to get any scheme
+    if [ -z "$ALL_SCHEMES" ]; then
+        ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//')
+    fi
+    
+    # Prefer main app schemes over auxiliary schemes
+    # Look for common main app patterns first
+    SCHEMES=$(echo "$ALL_SCHEMES" | grep -E "^(MoneyMaster|Bills To Budget|BillsToBudget|Main|App)$" | head -1)
+    
+    # If no main app scheme found, avoid auxiliary schemes and pick the first non-auxiliary one
     if [ -z "$SCHEMES" ]; then
-        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | head -1)
+        SCHEMES=$(echo "$ALL_SCHEMES" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
+    fi
+    
+    # If still no scheme, fall back to the first available scheme
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$ALL_SCHEMES" | head -1)
     fi
     
     if [ -z "$SCHEMES" ]; then
@@ -161,20 +189,20 @@ echo "Building for $PLATFORM $VERSION..."
 
 # Run xcodebuild
 if [ "$VERBOSE" = true ]; then
-    xcodebuild $PROJECT_ARG \
-        -scheme "$SCHEME" \
-        -destination "$DESTINATION" \
+    eval "xcodebuild $PROJECT_ARG \
+        -scheme \"$SCHEME\" \
+        -destination \"$DESTINATION\" \
         -configuration Debug \
-        build 2>&1 | tee "$TEMP_OUTPUT"
+        build" 2>&1 | tee "$TEMP_OUTPUT"
     BUILD_RESULT=${PIPESTATUS[0]}
 else
     echo "Building..."
     set +e  # Temporarily disable exit on error for xcodebuild
-    xcodebuild $PROJECT_ARG \
-        -scheme "$SCHEME" \
-        -destination "$DESTINATION" \
+    eval "xcodebuild $PROJECT_ARG \
+        -scheme \"$SCHEME\" \
+        -destination \"$DESTINATION\" \
         -configuration Debug \
-        build > "$TEMP_OUTPUT" 2>&1
+        build" > "$TEMP_OUTPUT" 2>&1
     BUILD_RESULT=$?
     set -e  # Re-enable exit on error
 fi
