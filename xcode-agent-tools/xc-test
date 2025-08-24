@@ -7,7 +7,6 @@ PLATFORM="iOS"
 VERSION="26.0"
 SCHEME=""
 DEVICE="iPhone 16"
-TEST_CLASS=""
 SPECIFIC_TEST=""
 VERBOSE=false
 
@@ -29,8 +28,9 @@ Options:
   -v, --version <version>      OS version (e.g., 26.0, 18.3.1) [default: 26.0]
   -s, --scheme <scheme>        Specific scheme to test
   -d, --device <device>        Device name (e.g., "iPhone 16", "iPad Pro") [default: iPhone 16]
-  -c, --class <class>          Run specific test class (e.g., "MyAppTests.LoginTests")
-  -t, --test <test>            Run specific test (e.g., "MyAppTests.LoginTests/testLogin")
+  -t, --test <test>            Run specific test class or method
+                               Class: "TestTarget/TestClass"
+                               Method: "TestTarget/TestClass/testMethod()"
   -h, --help                   Show this help message
   --verbose                    Show full xcodebuild output
 
@@ -38,8 +38,8 @@ Examples:
   xc-test                      # Run all tests with defaults
   xc-test -p macOS             # Run tests on macOS
   xc-test -d "iPad Pro"        # Run tests on iPad Pro simulator
-  xc-test -c "MyAppTests.NetworkTests"  # Run specific test class
-  xc-test -t "MyAppTests.NetworkTests/testAPICall"  # Run specific test
+  xc-test -t "MyAppTests/NetworkTests"  # Run specific test class
+  xc-test -t "MyAppTests/NetworkTests/testConnection()"  # Run specific test method
 
 EOF
 }
@@ -61,10 +61,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--device)
             DEVICE="$2"
-            shift 2
-            ;;
-        -c|--class)
-            TEST_CLASS="$2"
             shift 2
             ;;
         -t|--test)
@@ -201,8 +197,6 @@ esac
 TEST_ARGS=""
 if [ -n "$SPECIFIC_TEST" ]; then
     TEST_ARGS="-only-testing:$SPECIFIC_TEST"
-elif [ -n "$TEST_CLASS" ]; then
-    TEST_ARGS="-only-testing:$TEST_CLASS"
 fi
 
 # Create temp file for output and result bundle
@@ -214,8 +208,6 @@ trap "rm -f $TEMP_OUTPUT; rm -rf $RESULT_BUNDLE" EXIT
 echo ""
 if [ -n "$SPECIFIC_TEST" ]; then
     echo "Running test: $SPECIFIC_TEST on $DEVICE ($PLATFORM $VERSION)..."
-elif [ -n "$TEST_CLASS" ]; then
-    echo "Running test class: $TEST_CLASS on $DEVICE ($PLATFORM $VERSION)..."
 else
     echo "Running all tests on $DEVICE ($PLATFORM $VERSION)..."
 fi
@@ -227,7 +219,7 @@ if [ "$VERBOSE" = true ]; then
         -destination \"$DESTINATION\" \
         -configuration Debug \
         -resultBundlePath \"$RESULT_BUNDLE\" \
-        test $TEST_ARGS" 2>&1 | tee "$TEMP_OUTPUT"
+        test \"$TEST_ARGS\"" 2>&1 | tee "$TEMP_OUTPUT"
     TEST_RESULT=${PIPESTATUS[0]}
 else
     echo "Running tests..."
@@ -237,7 +229,7 @@ else
         -destination \"$DESTINATION\" \
         -configuration Debug \
         -resultBundlePath \"$RESULT_BUNDLE\" \
-        test $TEST_ARGS" > "$TEMP_OUTPUT" 2>&1
+        test \"$TEST_ARGS\"" > "$TEMP_OUTPUT" 2>&1
     TEST_RESULT=$?
     set -e  # Re-enable exit on error
 fi
