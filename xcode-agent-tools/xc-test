@@ -214,22 +214,40 @@ fi
 
 # Run xcodebuild test
 if [ "$VERBOSE" = true ]; then
-    eval "xcodebuild $PROJECT_ARG \
-        -scheme \"$SCHEME\" \
-        -destination \"$DESTINATION\" \
-        -configuration Debug \
-        -resultBundlePath \"$RESULT_BUNDLE\" \
-        test \"$TEST_ARGS\"" 2>&1 | tee "$TEMP_OUTPUT"
+    if [ -n "$TEST_ARGS" ]; then
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test \"$TEST_ARGS\"" 2>&1 | tee "$TEMP_OUTPUT"
+    else
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test" 2>&1 | tee "$TEMP_OUTPUT"
+    fi
     TEST_RESULT=${PIPESTATUS[0]}
 else
     echo "Running tests..."
     set +e  # Temporarily disable exit on error for xcodebuild
-    eval "xcodebuild $PROJECT_ARG \
-        -scheme \"$SCHEME\" \
-        -destination \"$DESTINATION\" \
-        -configuration Debug \
-        -resultBundlePath \"$RESULT_BUNDLE\" \
-        test \"$TEST_ARGS\"" > "$TEMP_OUTPUT" 2>&1
+    if [ -n "$TEST_ARGS" ]; then
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test \"$TEST_ARGS\"" > "$TEMP_OUTPUT" 2>&1
+    else
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test" > "$TEMP_OUTPUT" 2>&1
+    fi
     TEST_RESULT=$?
     set -e  # Re-enable exit on error
 fi
