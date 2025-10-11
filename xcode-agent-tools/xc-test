@@ -319,9 +319,11 @@ FATAL_ERROR_LINE=""
 if [ -d "$RESULT_BUNDLE" ]; then
     
     # First check for explicit crash indicators in the test output
-    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+    # Only match "Fatal error:" or "fatal error:" when it appears as an actual error message
+    # (typically at the start of a line or after standard error prefixes), not in file paths
+    if grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
-        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+        FATAL_ERROR_LINE=$(grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" | head -1)
     elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
         FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)
@@ -345,9 +347,10 @@ if [ -d "$RESULT_BUNDLE" ]; then
     fi
 else
     # Fallback to old text-based crash detection
-    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+    # Only match "Fatal error:" or "fatal error:" when it appears as an actual error message
+    if grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
-        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+        FATAL_ERROR_LINE=$(grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" | head -1)
     elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
         FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)

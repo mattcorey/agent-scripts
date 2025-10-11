@@ -37,20 +37,47 @@ Examples:
 EOF
 }
 
-# Parse command line arguments
+# Parse command line arguments (support both space and equals forms)
 while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--platform)
+            if [[ -z ${2-} || ${2:0:1} == '-' ]]; then
+                echo "Missing value for $1"
+                show_help
+                exit 1
+            fi
             PLATFORM="$2"
             shift 2
             ;;
+        -p=*|--platform=*)
+            PLATFORM="${1#*=}"
+            shift 1
+            ;;
         -v|--version)
+            if [[ -z ${2-} || ${2:0:1} == '-' ]]; then
+                echo "Missing value for $1"
+                show_help
+                exit 1
+            fi
             VERSION="$2"
             shift 2
             ;;
+        -v=*|--version=*)
+            VERSION="${1#*=}"
+            shift 1
+            ;;
         -s|--scheme)
+            if [[ -z ${2-} || ${2:0:1} == '-' ]]; then
+                echo "Missing value for $1"
+                show_help
+                exit 1
+            fi
             SCHEME="$2"
             shift 2
+            ;;
+        -s=*|--scheme=*)
+            SCHEME="${1#*=}"
+            shift 1
             ;;
         -h|--help)
             show_help
@@ -58,7 +85,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose)
             VERBOSE=true
-            shift
+            shift 1
             ;;
         *)
             echo "Unknown option: $1"
@@ -88,12 +115,12 @@ else
     exit 1
 fi
 
-# Build the -project or -workspace argument
+# Remember whether we're using a workspace or project (avoid eval later)
+USE_WORKSPACE=false
 if [ -n "$WORKSPACE" ]; then
-    PROJECT_ARG="-workspace \"$WORKSPACE\""
+    USE_WORKSPACE=true
     echo "Using workspace: $WORKSPACE"
 else
-    PROJECT_ARG="-project \"$PROJECT\""
     echo "Using project: $PROJECT"
 fi
 
@@ -171,7 +198,8 @@ case $PLATFORM in
         DESTINATION="platform=macOS"
         ;;
     visionOS)
-        DESTINATION="platform=visionOS Simulator,OS=$VERSION"
+        # Provide a default simulator name for visionOS similar to iOS
+        DESTINATION="platform=visionOS Simulator,OS=$VERSION,name=Apple Vision Pro"
         ;;
     *)
         echo -e "${RED}Error: Unknown platform $PLATFORM${NC}"
@@ -187,32 +215,42 @@ trap "rm -f $TEMP_OUTPUT" EXIT
 echo ""
 echo "Building for $PLATFORM $VERSION..."
 
+# Build xcodebuild command safely without eval
+XCB_CMD=(xcodebuild)
+if [ "$USE_WORKSPACE" = true ]; then
+    XCB_CMD+=(-workspace "$WORKSPACE")
+else
+    XCB_CMD+=(-project "$PROJECT")
+fi
+XCB_CMD+=(-scheme "$SCHEME" -destination "$DESTINATION" -configuration Debug build)
+
 # Run xcodebuild
 if [ "$VERBOSE" = true ]; then
-    eval "xcodebuild $PROJECT_ARG \
-        -scheme \"$SCHEME\" \
-        -destination \"$DESTINATION\" \
-        -configuration Debug \
-        build" 2>&1 | tee "$TEMP_OUTPUT"
+    "${XCB_CMD[@]}" 2>&1 | tee "$TEMP_OUTPUT"
     BUILD_RESULT=${PIPESTATUS[0]}
 else
     echo "Building..."
     set +e  # Temporarily disable exit on error for xcodebuild
-    eval "xcodebuild $PROJECT_ARG \
-        -scheme \"$SCHEME\" \
-        -destination \"$DESTINATION\" \
-        -configuration Debug \
-        build" > "$TEMP_OUTPUT" 2>&1
+    "${XCB_CMD[@]}" > "$TEMP_OUTPUT" 2>&1
     BUILD_RESULT=$?
     set -e  # Re-enable exit on error
 fi
 
 
-# Parse errors and warnings
+# Parse errors and warnings (robust counters)
 ERRORS=$(grep -E "^[^:]+:[0-9]+:[0-9]+: error:" "$TEMP_OUTPUT" | head -20)
-ERROR_COUNT=$(echo "$ERRORS" | grep -c "error:" || echo "0")
+# Count only non-empty lines; 0 if empty
+if [ -n "$ERRORS" ]; then
+    ERROR_COUNT=$(printf '%s\n' "$ERRORS" | awk 'NF{c++} END{print c+0}')
+else
+    ERROR_COUNT=0
+fi
 WARNINGS=$(grep -E "^[^:]+:[0-9]+:[0-9]+: warning:" "$TEMP_OUTPUT" | head -10)
-WARNING_COUNT=$(echo "$WARNINGS" | grep -c "warning:" || echo "0")
+if [ -n "$WARNINGS" ]; then
+    WARNING_COUNT=$(printf '%s\n' "$WARNINGS" | awk 'NF{c++} END{print c+0}')
+else
+    WARNING_COUNT=0
+fi
 
 # Display results
 echo ""
@@ -221,7 +259,7 @@ echo "===== BUILD RESULTS ====="
 if [ $BUILD_RESULT -eq 0 ]; then
     echo -e "Status: ${GREEN}SUCCESS${NC}"
     
-    if [ $WARNING_COUNT -gt 0 ]; then
+    if [ "${WARNING_COUNT:-0}" -gt 0 ]; then
         echo ""
         echo -e "${YELLOW}WARNINGS ($WARNING_COUNT):${NC}"
         while IFS= read -r line; do
@@ -245,13 +283,13 @@ if [ $BUILD_RESULT -eq 0 ]; then
     echo ""
     echo -e "${GREEN}Build succeeded${NC}"
     
-    if [ $WARNING_COUNT -gt 0 ]; then
+    if [ "${WARNING_COUNT:-0}" -gt 0 ]; then
         echo "Build completed with $WARNING_COUNT warnings"
     fi
 else
     echo -e "Status: ${RED}FAILED${NC}"
     
-    if [ $ERROR_COUNT -gt 0 ]; then
+    if [ "${ERROR_COUNT:-0}" -gt 0 ]; then
         echo ""
         echo -e "${RED}ERRORS ($ERROR_COUNT):${NC}"
         while IFS= read -r line; do
@@ -273,10 +311,20 @@ else
     fi
     
     echo ""
-    echo -e "${RED}Build failed with $ERROR_COUNT errors${NC}"
+    echo -e "${RED}Build failed with ${ERROR_COUNT:-0} errors${NC}"
+
+    # If no file-formatted errors captured, show generic xcodebuild error lines
+    if [ "${ERROR_COUNT:-0}" -eq 0 ]; then
+        GENERIC_ERRORS=$(grep -E "(error:|ERROR:)" "$TEMP_OUTPUT" | head -10)
+        if [ -n "$GENERIC_ERRORS" ]; then
+            echo ""
+            echo -e "${RED}ERRORS (from xcodebuild):${NC}"
+            echo "$GENERIC_ERRORS"
+        fi
+    fi
     
     # Check for other common errors
-    if [ $ERROR_COUNT -eq 0 ]; then
+    if [ "${ERROR_COUNT:-0}" -eq 0 ]; then
         if grep -q "Command PhaseScriptExecution failed" "$TEMP_OUTPUT"; then
             echo "Build script phase failed. Check build phases in Xcode."
         elif grep -q "No such module" "$TEMP_OUTPUT"; then
