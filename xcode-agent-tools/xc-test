@@ -7,7 +7,6 @@ PLATFORM="iOS"
 VERSION="26.0"
 SCHEME=""
 DEVICE="iPhone 16"
-TEST_CLASS=""
 SPECIFIC_TEST=""
 VERBOSE=false
 
@@ -29,8 +28,9 @@ Options:
   -v, --version <version>      OS version (e.g., 26.0, 18.3.1) [default: 26.0]
   -s, --scheme <scheme>        Specific scheme to test
   -d, --device <device>        Device name (e.g., "iPhone 16", "iPad Pro") [default: iPhone 16]
-  -c, --class <class>          Run specific test class (e.g., "MyAppTests.LoginTests")
-  -t, --test <test>            Run specific test (e.g., "MyAppTests.LoginTests/testLogin")
+  -t, --test <test>            Run specific test class or method
+                               Class: "TestTarget/TestClass"
+                               Method: "TestTarget/TestClass/testMethod()"
   -h, --help                   Show this help message
   --verbose                    Show full xcodebuild output
 
@@ -38,8 +38,8 @@ Examples:
   xc-test                      # Run all tests with defaults
   xc-test -p macOS             # Run tests on macOS
   xc-test -d "iPad Pro"        # Run tests on iPad Pro simulator
-  xc-test -c "MyAppTests.NetworkTests"  # Run specific test class
-  xc-test -t "MyAppTests.NetworkTests/testAPICall"  # Run specific test
+  xc-test -t "MyAppTests/NetworkTests"  # Run specific test class
+  xc-test -t "MyAppTests/NetworkTests/testConnection()"  # Run specific test method
 
 EOF
 }
@@ -61,10 +61,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--device)
             DEVICE="$2"
-            shift 2
-            ;;
-        -c|--class)
-            TEST_CLASS="$2"
             shift 2
             ;;
         -t|--test)
@@ -107,10 +103,10 @@ fi
 
 # Build the -project or -workspace argument
 if [ -n "$WORKSPACE" ]; then
-    PROJECT_ARG="-workspace $WORKSPACE"
+    PROJECT_ARG="-workspace \"$WORKSPACE\""
     echo "Using workspace: $WORKSPACE"
 else
-    PROJECT_ARG="-project $PROJECT"
+    PROJECT_ARG="-project \"$PROJECT\""
     echo "Using project: $PROJECT"
 fi
 
@@ -119,25 +115,53 @@ if [ -z "$SCHEME" ]; then
     echo "Detecting schemes..."
     
     # First, let's get the raw output for debugging
-    XCODE_LIST_OUTPUT=$(xcodebuild $PROJECT_ARG -list 2>/dev/null)
+    XCODE_LIST_OUTPUT=$(eval "xcodebuild $PROJECT_ARG -list" 2>&1)
+    XCODE_LIST_EXIT_CODE=$?
     
-    # Try different approaches to extract schemes
-    SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}' | head -1)
+    if [ $XCODE_LIST_EXIT_CODE -ne 0 ]; then
+        echo -e "${RED}Error: xcodebuild -list failed with exit code $XCODE_LIST_EXIT_CODE${NC}"
+        echo "Output:"
+        echo "$XCODE_LIST_OUTPUT"
+        exit 1
+    fi
+    
+    # Get all schemes
+    ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}')
     
     # If that doesn't work, try a simpler approach
-    if [ -z "$SCHEMES" ]; then
-        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//' | head -1)
+    if [ -z "$ALL_SCHEMES" ]; then
+        ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//')
     fi
     
     # If still empty, try to get any scheme
+    if [ -z "$ALL_SCHEMES" ]; then
+        ALL_SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//')
+    fi
+    
+    # Prefer main app schemes over auxiliary schemes
+    # Look for common main app patterns first
+    SCHEMES=$(echo "$ALL_SCHEMES" | grep -E "^(MoneyMaster|Bills To Budget|BillsToBudget|Main|App)$" | head -1)
+    
+    # If no main app scheme found, avoid auxiliary schemes and pick the first non-auxiliary one
     if [ -z "$SCHEMES" ]; then
-        SCHEMES=$(echo "$XCODE_LIST_OUTPUT" | grep -E "^[[:space:]]+[^[:space:]]" | grep -v "Targets:" | grep -v "Build Configurations:" | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | head -1)
+        SCHEMES=$(echo "$ALL_SCHEMES" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
+    fi
+    
+    # If still no scheme, fall back to the first available scheme
+    if [ -z "$SCHEMES" ]; then
+        SCHEMES=$(echo "$ALL_SCHEMES" | head -1)
     fi
     
     if [ -z "$SCHEMES" ]; then
         echo -e "${RED}Error: No schemes found${NC}"
-        echo "Debug: xcodebuild -list output:"
+        echo ""
+        echo "Debug: Full xcodebuild -list output:"
+        echo "======================================"
         echo "$XCODE_LIST_OUTPUT"
+        echo "======================================"
+        echo ""
+        echo "Please run 'xcodebuild $PROJECT_ARG -list' manually to see available schemes,"
+        echo "then use: xc-test -s \"YourSchemeName\""
         exit 1
     fi
     SCHEME=$SCHEMES
@@ -173,8 +197,6 @@ esac
 TEST_ARGS=""
 if [ -n "$SPECIFIC_TEST" ]; then
     TEST_ARGS="-only-testing:$SPECIFIC_TEST"
-elif [ -n "$TEST_CLASS" ]; then
-    TEST_ARGS="-only-testing:$TEST_CLASS"
 fi
 
 # Create temp file for output and result bundle
@@ -186,30 +208,46 @@ trap "rm -f $TEMP_OUTPUT; rm -rf $RESULT_BUNDLE" EXIT
 echo ""
 if [ -n "$SPECIFIC_TEST" ]; then
     echo "Running test: $SPECIFIC_TEST on $DEVICE ($PLATFORM $VERSION)..."
-elif [ -n "$TEST_CLASS" ]; then
-    echo "Running test class: $TEST_CLASS on $DEVICE ($PLATFORM $VERSION)..."
 else
     echo "Running all tests on $DEVICE ($PLATFORM $VERSION)..."
 fi
 
 # Run xcodebuild test
 if [ "$VERBOSE" = true ]; then
-    xcodebuild $PROJECT_ARG \
-        -scheme "$SCHEME" \
-        -destination "$DESTINATION" \
-        -configuration Debug \
-        -resultBundlePath "$RESULT_BUNDLE" \
-        test $TEST_ARGS 2>&1 | tee "$TEMP_OUTPUT"
+    if [ -n "$TEST_ARGS" ]; then
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test \"$TEST_ARGS\"" 2>&1 | tee "$TEMP_OUTPUT"
+    else
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test" 2>&1 | tee "$TEMP_OUTPUT"
+    fi
     TEST_RESULT=${PIPESTATUS[0]}
 else
     echo "Running tests..."
     set +e  # Temporarily disable exit on error for xcodebuild
-    xcodebuild $PROJECT_ARG \
-        -scheme "$SCHEME" \
-        -destination "$DESTINATION" \
-        -configuration Debug \
-        -resultBundlePath "$RESULT_BUNDLE" \
-        test $TEST_ARGS > "$TEMP_OUTPUT" 2>&1
+    if [ -n "$TEST_ARGS" ]; then
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test \"$TEST_ARGS\"" > "$TEMP_OUTPUT" 2>&1
+    else
+        eval "xcodebuild $PROJECT_ARG \
+            -scheme \"$SCHEME\" \
+            -destination \"$DESTINATION\" \
+            -configuration Debug \
+            -resultBundlePath \"$RESULT_BUNDLE\" \
+            test" > "$TEMP_OUTPUT" 2>&1
+    fi
     TEST_RESULT=$?
     set -e  # Re-enable exit on error
 fi
@@ -281,9 +319,11 @@ FATAL_ERROR_LINE=""
 if [ -d "$RESULT_BUNDLE" ]; then
     
     # First check for explicit crash indicators in the test output
-    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+    # Only match "Fatal error:" or "fatal error:" when it appears as an actual error message
+    # (typically at the start of a line or after standard error prefixes), not in file paths
+    if grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
-        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+        FATAL_ERROR_LINE=$(grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" | head -1)
     elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
         FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)
@@ -307,9 +347,10 @@ if [ -d "$RESULT_BUNDLE" ]; then
     fi
 else
     # Fallback to old text-based crash detection
-    if grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" > /dev/null; then
+    # Only match "Fatal error:" or "fatal error:" when it appears as an actual error message
+    if grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
-        FATAL_ERROR_LINE=$(grep -E "Fatal error:|fatal error:" "$TEMP_OUTPUT" | head -1)
+        FATAL_ERROR_LINE=$(grep -E "^[[:space:]]*(Fatal error:|fatal error:)" "$TEMP_OUTPUT" | head -1)
     elif grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" > /dev/null; then
         CRASH_DETECTED=true
         FATAL_ERROR_LINE=$(grep -i "index.*out.*of.*range\|index.*range" "$TEMP_OUTPUT" | head -1)
