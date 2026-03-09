@@ -15,12 +15,14 @@ usage() {
     echo "  worktree-name   Name of the worktree directory to remove"
     echo ""
     echo "Options:"
+    echo "  -y, --yes       Auto-confirm all prompts (keeps safety checks)"
     echo "  --keep-branch   Keep the branch after removing worktree"
     echo "  --force         Force removal even with uncommitted changes"
     echo "  -h, --help      Show this help message"
     echo ""
     echo "Examples:"
     echo "  wt-remove MyProject-feature-auth"
+    echo "  wt-remove MyProject-feature-auth -y"
     echo "  wt-remove MyProject-hotfix --keep-branch"
     echo "  wt-remove MyProject-temp --force"
     exit 1
@@ -36,9 +38,14 @@ fi
 WORKTREE_NAME=""
 KEEP_BRANCH=false
 FORCE=false
+YES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -y|--yes)
+            YES=true
+            shift
+            ;;
         --keep-branch)
             KEEP_BRANCH=true
             shift
@@ -154,7 +161,9 @@ else
     echo "Error details: $DERIVED_DATA_OUTPUT"
     echo ""
     
-    if [ "$FORCE" = false ]; then
+    if [ "$FORCE" = true ] || [ "$YES" = true ]; then
+        echo "Continuing without DerivedData cleanup..."
+    else
         read -p "Continue with worktree removal anyway? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -162,13 +171,11 @@ else
             exit 0
         fi
         echo "Continuing without DerivedData cleanup..."
-    else
-        echo "Force mode enabled - continuing without DerivedData cleanup..."
     fi
 fi
 
-# Confirm removal unless force is used
-if [ "$FORCE" = false ]; then
+# Confirm removal unless force or yes is used
+if [ "$FORCE" = false ] && [ "$YES" = false ]; then
     echo ""
     read -p "Are you sure you want to remove this worktree? (y/N): " -n 1 -r
     echo
@@ -201,7 +208,7 @@ if [ "$KEEP_BRANCH" = false ] && [ -n "$BRANCH_NAME" ]; then
         echo "✅ Branch '${BRANCH_NAME}' deleted successfully!"
     else
         echo "⚠️  Branch '${BRANCH_NAME}' has unmerged changes."
-        if [ "$FORCE" = true ]; then
+        if [ "$FORCE" = true ] || [ "$YES" = true ]; then
             git branch -D "$BRANCH_NAME"
             echo "✅ Branch '${BRANCH_NAME}' force-deleted!"
         else
@@ -228,7 +235,11 @@ if [ -n "$DERIVED_DATA_PATH" ] && [ -d "$DERIVED_DATA_PATH" ]; then
     echo "Folder: $(basename "$DERIVED_DATA_PATH")"
     echo "Size: $DERIVED_DATA_SIZE"
     
-    if [ "$FORCE" = false ]; then
+    if [ "$FORCE" = true ] || [ "$YES" = true ]; then
+        echo "Removing DerivedData..."
+        rm -rf "$DERIVED_DATA_PATH"
+        echo "✅ DerivedData cleaned up! ($DERIVED_DATA_SIZE freed)"
+    else
         read -p "Remove DerivedData folder? (Y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Nn]$ ]]; then
@@ -238,10 +249,6 @@ if [ -n "$DERIVED_DATA_PATH" ] && [ -d "$DERIVED_DATA_PATH" ]; then
             rm -rf "$DERIVED_DATA_PATH"
             echo "✅ DerivedData cleaned up! ($DERIVED_DATA_SIZE freed)"
         fi
-    else
-        echo "Removing DerivedData..."
-        rm -rf "$DERIVED_DATA_PATH"
-        echo "✅ DerivedData cleaned up! ($DERIVED_DATA_SIZE freed)"
     fi
 fi
 
