@@ -2,8 +2,14 @@
 
 # Git Worktree DerivedData Finder Script
 # Finds the DerivedData path for a git worktree containing an Xcode project
+#
+# Scans ~/Library/Developer/Xcode/DerivedData/ directly instead of invoking
+# xcodebuild, which avoids slow build-graph resolution and fragile simulator
+# destination matching.
 
 set -e
+
+DERIVED_DATA_ROOT="${HOME}/Library/Developer/Xcode/DerivedData"
 
 # Function to display usage
 usage() {
@@ -82,10 +88,10 @@ else
         echo "Error: Worktree name is required (or use --current)" >&2
         usage
     fi
-    
+
     # Find the actual worktree path by matching the name
     ACTUAL_WORKTREE_PATH=$(git worktree list | grep -E "/${WORKTREE_NAME}\s+" | awk '{print $1}' | head -1)
-    
+
     if [ -z "$ACTUAL_WORKTREE_PATH" ]; then
         echo "Error: Worktree '${WORKTREE_NAME}' not found" >&2
         echo "" >&2
@@ -96,7 +102,7 @@ else
         done
         exit 1
     fi
-    
+
     TARGET_PATH="$ACTUAL_WORKTREE_PATH"
     if [ "$VERBOSE" = true ]; then
         echo "Found worktree: $TARGET_PATH" >&2
@@ -109,7 +115,8 @@ if [ ! -d "$TARGET_PATH" ]; then
     exit 1
 fi
 
-# Auto-detect project file (prefer .xcworkspace over .xcodeproj)
+# Auto-detect project file to determine the project name
+# Prefer .xcworkspace over .xcodeproj over Package.swift
 PROJECT_FILE=""
 PROJECT_TYPE=""
 
@@ -117,48 +124,45 @@ if [ "$VERBOSE" = true ]; then
     echo "Searching for Xcode project files in: $TARGET_PATH" >&2
 fi
 
-# Check for Swift Package first
-if [ -f "$TARGET_PATH/Package.swift" ]; then
-    PROJECT_FILE="$TARGET_PATH/Package.swift"
-    PROJECT_TYPE="-package"
+# Check for workspace files first
+WORKSPACE_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
+if [ -n "$WORKSPACE_FILES" ]; then
+    PROJECT_FILE=$(echo "$WORKSPACE_FILES" | head -1)
+    PROJECT_TYPE="workspace"
     if [ "$VERBOSE" = true ]; then
-        echo "Found Swift Package: Package.swift" >&2
+        echo "Found workspace: $(basename "$PROJECT_FILE")" >&2
     fi
 else
-    # Check for workspace files (use find to avoid issues with shell expansion)
-    WORKSPACE_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcworkspace" -type d 2>/dev/null)
-    if [ -n "$WORKSPACE_FILES" ]; then
-        PROJECT_FILE=$(echo "$WORKSPACE_FILES" | head -1)
-        PROJECT_TYPE="-workspace"
+    # Check for project files
+    PROJECT_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null)
+    if [ -n "$PROJECT_FILES" ]; then
+        PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
+        PROJECT_TYPE="project"
         if [ "$VERBOSE" = true ]; then
-            echo "Found workspace: $(basename "$PROJECT_FILE")" >&2
+            echo "Found project: $(basename "$PROJECT_FILE")" >&2
+        fi
+    elif [ -f "$TARGET_PATH/Package.swift" ]; then
+        PROJECT_FILE="$TARGET_PATH/Package.swift"
+        PROJECT_TYPE="package"
+        if [ "$VERBOSE" = true ]; then
+            echo "Found Swift Package: Package.swift" >&2
         fi
     else
-        # Check for project files
-        PROJECT_FILES=$(find "$TARGET_PATH" -maxdepth 1 -name "*.xcodeproj" -type d 2>/dev/null)
-        if [ -n "$PROJECT_FILES" ]; then
-            PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
-            PROJECT_TYPE="-project"
-            if [ "$VERBOSE" = true ]; then
-                echo "Found project: $(basename "$PROJECT_FILE")" >&2
-            fi
-        else
-            echo "Error: No Swift Package (Package.swift), Xcode project (.xcodeproj) or workspace (.xcworkspace) found in: $TARGET_PATH" >&2
-            exit 1
+        # No Xcode project found — nothing to clean up (not an error)
+        if [ "$VERBOSE" = true ]; then
+            echo "No Xcode project found in: $TARGET_PATH" >&2
         fi
+        exit 0
     fi
 fi
 
 # Extract project name from file
-if [ "$PROJECT_TYPE" = "-package" ]; then
-    # For Swift packages, extract the name from Package.swift
+if [ "$PROJECT_TYPE" = "package" ]; then
     PROJECT_NAME=$(grep -E '^\s*name:' "$PROJECT_FILE" | head -1 | sed -E 's/.*name:\s*"([^"]+)".*/\1/')
     if [ -z "$PROJECT_NAME" ]; then
-        # Fallback to directory name if we can't parse the name
         PROJECT_NAME=$(basename "$TARGET_PATH")
     fi
 else
-    # For projects/workspaces, remove path and extension
     PROJECT_NAME=$(basename "$PROJECT_FILE" | sed -E 's/\.(xcworkspace|xcodeproj)$//')
 fi
 
@@ -166,147 +170,83 @@ if [ "$VERBOSE" = true ]; then
     echo "Project name: $PROJECT_NAME" >&2
 fi
 
-# Auto-detect scheme (try project name first, then fallback to available schemes)
-SCHEME="$PROJECT_NAME"
-
-if [ "$VERBOSE" = true ]; then
-    echo "Attempting to detect available schemes..." >&2
+# Check that DerivedData root exists
+if [ ! -d "$DERIVED_DATA_ROOT" ]; then
+    if [ "$VERBOSE" = true ]; then
+        echo "DerivedData root does not exist: $DERIVED_DATA_ROOT" >&2
+    fi
+    exit 0
 fi
 
-# Try to get list of available schemes
-if [ "$PROJECT_TYPE" = "-package" ]; then
-    # For Swift packages, we need to run from the package directory
-    AVAILABLE_SCHEMES=$(cd "$TARGET_PATH" && xcodebuild -list 2>/dev/null | awk '/Schemes:/ {p=1; next} p && NF && !/^$/ {print $0} /^$/ && p {p=0}' | sed 's/^[[:space:]]*//')
-else
-    AVAILABLE_SCHEMES=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -list 2>/dev/null | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | sed 's/^[[:space:]]*//' | grep -v '^$')
-fi
+# Scan DerivedData for matching directories.
+# Xcode names them <ProjectName>-<hash>, so we glob for the prefix.
+# Then verify via the info.plist WorkspacePath to confirm it belongs to
+# the right worktree (not the main checkout or another worktree).
+MATCHED_PATH=""
 
-if [ -n "$AVAILABLE_SCHEMES" ]; then
-    if [ "$PROJECT_TYPE" = "-package" ]; then
-        # For Swift packages, try multiple strategies to find the right scheme
-        
-        # Strategy 1: Look for scheme ending in "-Package"
-        PACKAGE_SCHEME=$(echo "$AVAILABLE_SCHEMES" | grep -E "\-Package$" | head -1)
-        
-        # Strategy 2: Look for scheme matching the project name
-        PROJECT_SCHEME=$(echo "$AVAILABLE_SCHEMES" | grep -E "^$PROJECT_NAME$" | head -1)
-        
-        if [ -n "$PACKAGE_SCHEME" ]; then
-            SCHEME="$PACKAGE_SCHEME"
-            if [ "$VERBOSE" = true ]; then
-                echo "Using Swift Package scheme ending in -Package: $SCHEME" >&2
-            fi
-        elif [ -n "$PROJECT_SCHEME" ]; then
-            SCHEME="$PROJECT_SCHEME"
-            if [ "$VERBOSE" = true ]; then
-                echo "Using Swift Package scheme matching project name: $SCHEME" >&2
-            fi
-        else
-            # Fallback to first available scheme
-            SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
-            if [ "$VERBOSE" = true ]; then
-                echo "Using first available Swift Package scheme: $SCHEME" >&2
-            fi
+for CANDIDATE in "$DERIVED_DATA_ROOT/${PROJECT_NAME}-"*/; do
+    # Guard against no-match (the literal glob string)
+    [ -d "$CANDIDATE" ] || continue
+
+    if [ "$VERBOSE" = true ]; then
+        echo "Checking candidate: $CANDIDATE" >&2
+    fi
+
+    # Each DerivedData folder has an info.plist with the WorkspacePath
+    INFO_PLIST="${CANDIDATE}info.plist"
+    if [ ! -f "$INFO_PLIST" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo "  Skipping (no info.plist)" >&2
         fi
-    else
-        # For regular projects/workspaces, check if our assumed scheme (project name) exists in the list
-        if echo "$AVAILABLE_SCHEMES" | grep -q "^$PROJECT_NAME$"; then
-            SCHEME="$PROJECT_NAME"
-            if [ "$VERBOSE" = true ]; then
-                echo "Using scheme: $SCHEME (matches project name)" >&2
-            fi
-        else
-            # Use the first available scheme
-            SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -1)
-            if [ "$VERBOSE" = true ]; then
-                echo "Project name scheme not found, using first available scheme: $SCHEME" >&2
-            fi
+        continue
+    fi
+
+    # Read WorkspacePath from the plist
+    WORKSPACE_PATH=$(/usr/libexec/PlistBuddy -c "Print :WorkspacePath" "$INFO_PLIST" 2>/dev/null || true)
+    if [ -z "$WORKSPACE_PATH" ]; then
+        if [ "$VERBOSE" = true ]; then
+            echo "  Skipping (no WorkspacePath in plist)" >&2
         fi
+        continue
     fi
-else
-    # Fallback to project name if we can't get the scheme list
+
     if [ "$VERBOSE" = true ]; then
-        echo "Could not detect schemes, using project name as scheme: $SCHEME" >&2
+        echo "  WorkspacePath: $WORKSPACE_PATH" >&2
     fi
-fi
 
-if [ "$VERBOSE" = true ]; then
-    echo "Final scheme: $SCHEME" >&2
-fi
+    # Check if the WorkspacePath points into our target worktree
+    # The plist stores the path to the .xcodeproj/.xcworkspace/Package.swift
+    case "$WORKSPACE_PATH" in
+        "$TARGET_PATH"/*|"$TARGET_PATH")
+            # Verify it has a Build folder (sanity check)
+            if [ -d "${CANDIDATE}Build" ]; then
+                # Remove trailing slash for clean output
+                MATCHED_PATH="${CANDIDATE%/}"
+                if [ "$VERBOSE" = true ]; then
+                    echo "  ✓ Matched!" >&2
+                fi
+                break
+            else
+                if [ "$VERBOSE" = true ]; then
+                    echo "  Skipping (no Build folder)" >&2
+                fi
+            fi
+            ;;
+        *)
+            if [ "$VERBOSE" = true ]; then
+                echo "  Skipping (WorkspacePath doesn't match target)" >&2
+            fi
+            ;;
+    esac
+done
 
-# Generic destination for -showBuildSettings (use same format as deploy-to-simulator)
-DESTINATION="platform=iOS Simulator,OS=26.0,name=iPad Pro 11-inch (M4)"
-
-if [ "$VERBOSE" = true ]; then
-    echo "Getting DerivedData path using xcodebuild..." >&2
-    if [ "$PROJECT_TYPE" = "-package" ]; then
-        echo "Working directory: $TARGET_PATH" >&2
-        echo "Command: xcodebuild -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
-    else
-        echo "Command: xcodebuild $PROJECT_TYPE \"$PROJECT_FILE\" -scheme \"$SCHEME\" -destination \"$DESTINATION\" -showBuildSettings" >&2
-    fi
-fi
-
-# Get the DerivedData path using xcodebuild -showBuildSettings
-if [ "$PROJECT_TYPE" = "-package" ]; then
-    # For Swift packages, run xcodebuild from the package directory without project/workspace flags
-    ORIGINAL_DIR=$(pwd)
-    cd "$TARGET_PATH"
-    
+if [ -z "$MATCHED_PATH" ]; then
     if [ "$VERBOSE" = true ]; then
-        echo "Resolving Swift Package dependencies..." >&2
+        echo "No matching DerivedData found for project '$PROJECT_NAME' at path '$TARGET_PATH'" >&2
     fi
-    
-    # First try to resolve dependencies (ignore errors as it might already be resolved)
-    xcodebuild -resolvePackageDependencies 2>/dev/null || true
-    
-    # Now get build settings
-    BUILD_DIR=$(xcodebuild -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
-    cd "$ORIGINAL_DIR"
-else
-    BUILD_DIR=$(xcodebuild $PROJECT_TYPE "$PROJECT_FILE" -scheme "$SCHEME" -destination "$DESTINATION" -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | sed 's/.*= //')
-fi
-
-if [ -z "$BUILD_DIR" ]; then
-    echo "Error: Could not determine build directory using xcodebuild" >&2
-    echo "This might happen if:" >&2
-    echo "  - The scheme '$SCHEME' is invalid" >&2
-    if [ "$PROJECT_TYPE" = "-package" ]; then
-        echo "  - Swift Package dependencies could not be resolved" >&2
-        echo "  - The Package.swift file has configuration issues" >&2
-        echo "  - Try running 'swift package resolve' in the package directory first" >&2
-    else
-        echo "  - The project has configuration issues" >&2
-    fi
-    echo "  - Xcode command line tools are not properly installed" >&2
-    if [ "$VERBOSE" = true ]; then
-        echo "" >&2
-        echo "Available schemes found:" >&2
-        echo "$AVAILABLE_SCHEMES" >&2
-    fi
-    exit 1
-fi
-
-# Extract DerivedData path (3 levels up from BUILT_PRODUCTS_DIR)
-# Path structure: DerivedData/ProjectName-hash/Build/Products/Debug-iphonesimulator/
-DERIVED_DATA_PATH=$(dirname $(dirname $(dirname "$BUILD_DIR")))
-
-if [ "$VERBOSE" = true ]; then
-    echo "Build directory: $BUILD_DIR" >&2
-    echo "DerivedData path: $DERIVED_DATA_PATH" >&2
-fi
-
-# Verify the DerivedData path exists and looks correct
-if [ ! -d "$DERIVED_DATA_PATH" ]; then
-    echo "Error: Calculated DerivedData path does not exist: $DERIVED_DATA_PATH" >&2
-    exit 1
-fi
-
-# Verify it's actually a DerivedData directory (should contain Build folder)
-if [ ! -d "$DERIVED_DATA_PATH/Build" ]; then
-    echo "Error: Path does not appear to be a valid DerivedData directory (missing Build folder): $DERIVED_DATA_PATH" >&2
-    exit 1
+    # Exit successfully with no output — caller interprets empty output as "nothing to clean"
+    exit 0
 fi
 
 # Output the DerivedData path to stdout
-echo "$DERIVED_DATA_PATH"
+echo "$MATCHED_PATH"
