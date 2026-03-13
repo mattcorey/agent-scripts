@@ -134,7 +134,7 @@ for i in "${!WORKTREES[@]}"; do
 
     # --- Determine state up front ---
     WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)
-    REMOTE_BASE_HEAD=$(git rev-parse "$REMOTE_BASE" 2>/dev/null)
+    REMOTE_BASE_HEAD=$(git rev-parse "$REMOTE_BASE" 2>/dev/null || true)
 
     # Uncommitted changes
     DIRTY_COUNT=$(git -C "$WT_PATH" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
@@ -145,16 +145,19 @@ for i in "${!WORKTREES[@]}"; do
 
     # Is HEAD an ancestor of origin/main? (i.e. all commits have been merged)
     IS_MERGED=false
-    if git merge-base --is-ancestor "$WT_HEAD" "$REMOTE_BASE" 2>/dev/null; then
+    if [[ -n "$REMOTE_BASE_HEAD" ]] && git merge-base --is-ancestor "$WT_HEAD" "$REMOTE_BASE" 2>/dev/null; then
         IS_MERGED=true
     fi
 
-    # Was this branch ever a real branch (not just a checkout of main)?
-    # Find the merge-base between the worktree HEAD and origin/main — if that
-    # equals HEAD itself, every commit is already on main.
-    NEVER_DIVERGED=false
-    if [[ "$WT_HEAD" == "$REMOTE_BASE_HEAD" ]]; then
-        NEVER_DIVERGED=true
+    # Was this branch ever a real feature branch that got merged?
+    # Check if origin/main has a merge commit referencing this branch name.
+    # This avoids false positives for branches that are simply behind main.
+    WAS_MERGED_BRANCH=false
+    if [[ "$IS_MERGED" == true ]]; then
+        MERGE_COMMIT=$(git log --merges --oneline "$REMOTE_BASE" --grep="$BRANCH" 2>/dev/null | head -1)
+        if [[ -n "$MERGE_COMMIT" ]]; then
+            WAS_MERGED_BRANCH=true
+        fi
     fi
 
     # Does the branch still exist on the remote?
@@ -163,10 +166,10 @@ for i in "${!WORKTREES[@]}"; do
     # --- Commits ---
     UNMERGED_COUNT=$(git -C "$WT_PATH" rev-list --count "${REMOTE_BASE}..HEAD" 2>/dev/null || echo "0")
 
-    if [[ "$NEVER_DIVERGED" == true ]]; then
-        # Branch tip is exactly origin/main — never had unique work or was fully merged + FF'd
+    if [[ "$IS_MERGED" == true && "$UNMERGED_COUNT" -eq 0 && "$WAS_MERGED_BRANCH" == false ]]; then
+        # HEAD is on main, no unmerged commits, no merge commit found — never had unique work
         echo "   📊 Commits ahead of ${BASE_BRANCH}: 0"
-        echo "   📝 No unique commits (branch tip equals ${BASE_BRANCH})"
+        echo "   📝 No unique commits (branch tip is on ${BASE_BRANCH})"
     elif [[ "$IS_MERGED" == true && "$UNMERGED_COUNT" -eq 0 ]]; then
         # All commits have been merged into main — show what was contributed
         # Use the reflog or branch history to find original commits
@@ -199,7 +202,7 @@ for i in "${!WORKTREES[@]}"; do
     # --- Pushed to origin ---
     if [[ -n "$REMOTE_REF" ]]; then
         echo "   ☁️  Pushed to origin: Yes"
-    elif [[ "$IS_MERGED" == true && "$NEVER_DIVERGED" == false ]]; then
+    elif [[ "$WAS_MERGED_BRANCH" == true ]]; then
         echo "   ☁️  Pushed to origin: Yes (branch deleted after merge)"
     else
         echo "   ☁️  Pushed to origin: No"
@@ -207,21 +210,21 @@ for i in "${!WORKTREES[@]}"; do
 
     # --- Merged / removal candidate ---
     if [[ "$IS_MERGED" == true ]]; then
-        if [[ "$NEVER_DIVERGED" == true ]]; then
-            # Never had unique work — just a checkout of main
-            if [[ "$IS_DIRTY" == true ]]; then
-                echo "   🚧 Has uncommitted work — review before removing"
-            else
-                echo "   🗑️  No commits, no changes — candidate for removal"
-                REMOVAL_CANDIDATES+=("$WT_NAME")
-            fi
-        else
+        if [[ "$WAS_MERGED_BRANCH" == true ]]; then
             # Had real commits, all now merged
             if [[ "$IS_DIRTY" == true ]]; then
                 echo "   ✅ Merged into ${BASE_BRANCH}"
                 echo "   🚧 NOT a removal candidate — has ${DIRTY_COUNT} uncommitted file(s)"
             else
                 echo "   ✅ Merged into ${BASE_BRANCH} — candidate for removal"
+                REMOVAL_CANDIDATES+=("$WT_NAME")
+            fi
+        else
+            # Never had unique work — just a checkout of main
+            if [[ "$IS_DIRTY" == true ]]; then
+                echo "   🚧 Has uncommitted work — review before removing"
+            else
+                echo "   🗑️  No commits, no changes — candidate for removal"
                 REMOVAL_CANDIDATES+=("$WT_NAME")
             fi
         fi
