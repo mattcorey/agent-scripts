@@ -77,6 +77,11 @@ fi
 PROJECT_NAME=$(basename "$MAIN_WORKTREE")
 echo "🌿 Worktree Status for ${PROJECT_NAME}"
 echo "=================================="
+
+# Fetch latest remote state so merge/push checks are accurate
+echo "   Fetching latest from origin..."
+git fetch --prune origin >/dev/null 2>&1 || echo "   ⚠️  Could not fetch from origin (offline?)"
+REMOTE_BASE="origin/${BASE_BRANCH}"
 echo ""
 
 # Collect worktree paths and branches
@@ -127,72 +132,108 @@ for i in "${!WORKTREES[@]}"; do
     echo "   🌿 Branch: ${BRANCH}"
     echo "   📍 Path: ${WT_PATH}"
 
-    # --- Commits ahead of base branch ---
-    COMMIT_COUNT=$(git -C "$WT_PATH" rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
-    echo "   📊 Commits ahead of ${BASE_BRANCH}: ${COMMIT_COUNT}"
+    # --- Determine state up front ---
+    WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)
+    REMOTE_BASE_HEAD=$(git rev-parse "$REMOTE_BASE" 2>/dev/null)
 
-    if [[ "$COMMIT_COUNT" -gt 0 ]]; then
-        # First commit on branch
-        FIRST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --reverse --format="%ai | %s" 2>/dev/null | head -1)
-        LAST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --format="%ai | %s" 2>/dev/null | head -1)
-        echo "   🕐 First commit: ${FIRST_COMMIT}"
-        echo "   🕐 Last commit:  ${LAST_COMMIT}"
-
-        # Diff stat summary
-        DIFF_STAT=$(git -C "$WT_PATH" diff --shortstat "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "")
-        if [[ -n "$DIFF_STAT" ]]; then
-            echo "   📝 Changes:${DIFF_STAT}"
-        fi
-    else
-        echo "   📝 No unique commits (branch tip equals ${BASE_BRANCH})"
-    fi
-
-    # --- Uncommitted changes ---
+    # Uncommitted changes
     DIRTY_COUNT=$(git -C "$WT_PATH" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
     IS_DIRTY=false
     if [[ "$DIRTY_COUNT" -gt 0 ]]; then
-        echo "   ⚠️  Uncommitted changes: ${DIRTY_COUNT} file(s)"
         IS_DIRTY=true
     fi
 
-    # --- Pushed to origin ---
+    # Is HEAD an ancestor of origin/main? (i.e. all commits have been merged)
+    IS_MERGED=false
+    if git merge-base --is-ancestor "$WT_HEAD" "$REMOTE_BASE" 2>/dev/null; then
+        IS_MERGED=true
+    fi
+
+    # Was this branch ever a real branch (not just a checkout of main)?
+    # Find the merge-base between the worktree HEAD and origin/main — if that
+    # equals HEAD itself, every commit is already on main.
+    NEVER_DIVERGED=false
+    if [[ "$WT_HEAD" == "$REMOTE_BASE_HEAD" ]]; then
+        NEVER_DIVERGED=true
+    fi
+
+    # Does the branch still exist on the remote?
     REMOTE_REF=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | head -1)
+
+    # --- Commits ---
+    UNMERGED_COUNT=$(git -C "$WT_PATH" rev-list --count "${REMOTE_BASE}..HEAD" 2>/dev/null || echo "0")
+
+    if [[ "$NEVER_DIVERGED" == true ]]; then
+        # Branch tip is exactly origin/main — never had unique work or was fully merged + FF'd
+        echo "   📊 Commits ahead of ${BASE_BRANCH}: 0"
+        echo "   📝 No unique commits (branch tip equals ${BASE_BRANCH})"
+    elif [[ "$IS_MERGED" == true && "$UNMERGED_COUNT" -eq 0 ]]; then
+        # All commits have been merged into main — show what was contributed
+        # Use the reflog or branch history to find original commits
+        # Count how many commits on this branch are reachable from HEAD but not
+        # from where the branch originally diverged from main
+        LAST_COMMIT=$(git -C "$WT_PATH" log -1 --format="%ai | %s" 2>/dev/null)
+        echo "   📊 All commits merged into ${BASE_BRANCH}"
+        echo "   🕐 Last commit:  ${LAST_COMMIT}"
+    else
+        # Unmerged branch with unique commits
+        echo "   📊 Commits ahead of ${BASE_BRANCH}: ${UNMERGED_COUNT}"
+        if [[ "$UNMERGED_COUNT" -gt 0 ]]; then
+            FIRST_COMMIT=$(git -C "$WT_PATH" log "${REMOTE_BASE}..HEAD" --reverse --format="%ai | %s" 2>/dev/null | head -1)
+            LAST_COMMIT=$(git -C "$WT_PATH" log "${REMOTE_BASE}..HEAD" --format="%ai | %s" 2>/dev/null | head -1)
+            echo "   🕐 First commit: ${FIRST_COMMIT}"
+            echo "   🕐 Last commit:  ${LAST_COMMIT}"
+
+            DIFF_STAT=$(git -C "$WT_PATH" diff --shortstat "${REMOTE_BASE}..HEAD" 2>/dev/null || echo "")
+            if [[ -n "$DIFF_STAT" ]]; then
+                echo "   📝 Changes:${DIFF_STAT}"
+            fi
+        fi
+    fi
+
+    # --- Uncommitted changes ---
+    if [[ "$IS_DIRTY" == true ]]; then
+        echo "   ⚠️  Uncommitted changes: ${DIRTY_COUNT} file(s)"
+    fi
+
+    # --- Pushed to origin ---
     if [[ -n "$REMOTE_REF" ]]; then
         echo "   ☁️  Pushed to origin: Yes"
+    elif [[ "$IS_MERGED" == true && "$NEVER_DIVERGED" == false ]]; then
+        echo "   ☁️  Pushed to origin: Yes (branch deleted after merge)"
     else
         echo "   ☁️  Pushed to origin: No"
     fi
 
-    # --- Merged into base branch / removal candidate ---
-    if [[ "$COMMIT_COUNT" -eq 0 ]]; then
-        # No unique commits — merge concept doesn't apply
-        if [[ "$IS_DIRTY" == true ]]; then
-            echo "   🚧 Has uncommitted work — review before removing"
-        else
-            echo "   🗑️  No commits, no changes — candidate for removal"
-            REMOVAL_CANDIDATES+=("$WT_NAME")
-        fi
-    else
-        # Has commits — check if they've been merged
-        MERGED=false
-        WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)
-        if git merge-base --is-ancestor "$WT_HEAD" "$BASE_BRANCH" 2>/dev/null; then
-            MERGED=true
-        else
-            # Also check if branch has been merged via squash/rebase
-            # by seeing if the diff between this branch and base is empty
-            DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${BASE_BRANCH}..HEAD" --stat 2>/dev/null | tail -1)
-            if [[ -z "$DIFF_TO_MAIN" ]]; then
-                MERGED=true
-            fi
-        fi
-
-        if [[ "$MERGED" == true ]]; then
+    # --- Merged / removal candidate ---
+    if [[ "$IS_MERGED" == true ]]; then
+        if [[ "$NEVER_DIVERGED" == true ]]; then
+            # Never had unique work — just a checkout of main
             if [[ "$IS_DIRTY" == true ]]; then
-                echo "   ✅ Merged into ${BASE_BRANCH}: Yes"
+                echo "   🚧 Has uncommitted work — review before removing"
+            else
+                echo "   🗑️  No commits, no changes — candidate for removal"
+                REMOVAL_CANDIDATES+=("$WT_NAME")
+            fi
+        else
+            # Had real commits, all now merged
+            if [[ "$IS_DIRTY" == true ]]; then
+                echo "   ✅ Merged into ${BASE_BRANCH}"
                 echo "   🚧 NOT a removal candidate — has ${DIRTY_COUNT} uncommitted file(s)"
             else
-                echo "   ✅ Merged into ${BASE_BRANCH}: Yes — candidate for removal"
+                echo "   ✅ Merged into ${BASE_BRANCH} — candidate for removal"
+                REMOVAL_CANDIDATES+=("$WT_NAME")
+            fi
+        fi
+    else
+        # Check squash/rebase merge (diff is empty even though commits differ)
+        DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${REMOTE_BASE}..HEAD" --stat 2>/dev/null | tail -1)
+        if [[ -z "$DIFF_TO_MAIN" ]]; then
+            if [[ "$IS_DIRTY" == true ]]; then
+                echo "   ✅ Merged into ${BASE_BRANCH} (squash/rebase)"
+                echo "   🚧 NOT a removal candidate — has ${DIRTY_COUNT} uncommitted file(s)"
+            else
+                echo "   ✅ Merged into ${BASE_BRANCH} (squash/rebase) — candidate for removal"
                 REMOVAL_CANDIDATES+=("$WT_NAME")
             fi
         else
