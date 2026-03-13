@@ -1,0 +1,215 @@
+#!/bin/bash
+
+# Git Worktree Status Script
+# Provides detailed status for all worktrees: commits, merge state, remote state
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: wt-status [options] [worktree-name]"
+    echo ""
+    echo "Shows detailed status for all worktrees (or a specific one)."
+    echo ""
+    echo "Options:"
+    echo "  -h, --help       Show this help message"
+    echo ""
+    echo "Output per worktree:"
+    echo "  - Branch name and commit count ahead of base branch"
+    echo "  - First and last commit dates"
+    echo "  - Diff stat (files changed, insertions, deletions)"
+    echo "  - Whether pushed to origin"
+    echo "  - Whether merged into base branch"
+    echo "  - Uncommitted changes warning"
+    echo ""
+    echo "Examples:"
+    echo "  wt-status"
+    echo "  wt-status calendar-2.0"
+    exit 0
+}
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    exit 1
+fi
+
+# Parse arguments
+FILTER_NAME=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            usage
+            ;;
+        *)
+            FILTER_NAME="$1"
+            shift
+            ;;
+    esac
+done
+
+# Ensure we're on the main worktree so base ref is available
+MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+
+# Detect the default branch (main, master, trunk, etc.)
+BASE_BRANCH=""
+if REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+    BASE_BRANCH=${REF#refs/remotes/origin/}
+fi
+# Fallback: check common names if origin/HEAD isn't set
+if [[ -z "$BASE_BRANCH" ]]; then
+    for CANDIDATE in main master trunk; do
+        if git rev-parse --verify "$CANDIDATE" >/dev/null 2>&1; then
+            BASE_BRANCH="$CANDIDATE"
+            break
+        fi
+    done
+fi
+if [[ -z "$BASE_BRANCH" ]]; then
+    echo "Error: Could not detect default branch (tried origin/HEAD, main, master, trunk)"
+    exit 1
+fi
+
+PROJECT_NAME=$(basename "$MAIN_WORKTREE")
+echo "🌿 Worktree Status for ${PROJECT_NAME}"
+echo "=================================="
+echo ""
+
+# Collect worktree paths and branches
+WORKTREES=()
+BRANCHES=()
+
+while IFS= read -r line; do
+    if [[ $line == worktree* ]]; then
+        WT_PATH=${line#worktree }
+        read -r HEAD_LINE || true
+        read -r BRANCH_LINE || true
+
+        # Skip the main worktree
+        if [[ "$WT_PATH" == "$MAIN_WORKTREE" ]]; then
+            continue
+        fi
+
+        WT_NAME=$(basename "$WT_PATH")
+
+        # If filtering, skip non-matching worktrees
+        if [[ -n "$FILTER_NAME" && "$WT_NAME" != "$FILTER_NAME" ]]; then
+            continue
+        fi
+
+        BRANCH_NAME=${BRANCH_LINE#branch refs/heads/}
+        WORKTREES+=("$WT_PATH")
+        BRANCHES+=("$BRANCH_NAME")
+    fi
+done < <(git worktree list --porcelain)
+
+if [[ ${#WORKTREES[@]} -eq 0 ]]; then
+    if [[ -n "$FILTER_NAME" ]]; then
+        echo "No worktree found matching '${FILTER_NAME}'"
+    else
+        echo "No worktrees found (besides main)."
+    fi
+    exit 0
+fi
+
+REMOVAL_CANDIDATES=()
+
+for i in "${!WORKTREES[@]}"; do
+    WT_PATH="${WORKTREES[$i]}"
+    BRANCH="${BRANCHES[$i]}"
+    WT_NAME=$(basename "$WT_PATH")
+
+    echo "📁 ${WT_NAME}"
+    echo "   🌿 Branch: ${BRANCH}"
+    echo "   📍 Path: ${WT_PATH}"
+
+    # --- Commits ahead of base branch ---
+    COMMIT_COUNT=$(git -C "$WT_PATH" rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+    echo "   📊 Commits ahead of ${BASE_BRANCH}: ${COMMIT_COUNT}"
+
+    if [[ "$COMMIT_COUNT" -gt 0 ]]; then
+        # First commit on branch
+        FIRST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --reverse --format="%ai | %s" 2>/dev/null | head -1)
+        LAST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --format="%ai | %s" 2>/dev/null | head -1)
+        echo "   🕐 First commit: ${FIRST_COMMIT}"
+        echo "   🕐 Last commit:  ${LAST_COMMIT}"
+
+        # Diff stat summary
+        DIFF_STAT=$(git -C "$WT_PATH" diff --shortstat "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "")
+        if [[ -n "$DIFF_STAT" ]]; then
+            echo "   📝 Changes:${DIFF_STAT}"
+        fi
+    else
+        echo "   📝 No unique commits (branch tip equals ${BASE_BRANCH})"
+    fi
+
+    # --- Uncommitted changes ---
+    DIRTY_COUNT=$(git -C "$WT_PATH" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    IS_DIRTY=false
+    if [[ "$DIRTY_COUNT" -gt 0 ]]; then
+        echo "   ⚠️  Uncommitted changes: ${DIRTY_COUNT} file(s)"
+        IS_DIRTY=true
+    fi
+
+    # --- Pushed to origin ---
+    REMOTE_REF=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | head -1)
+    if [[ -n "$REMOTE_REF" ]]; then
+        echo "   ☁️  Pushed to origin: Yes"
+    else
+        echo "   ☁️  Pushed to origin: No"
+    fi
+
+    # --- Merged into base branch / removal candidate ---
+    if [[ "$COMMIT_COUNT" -eq 0 ]]; then
+        # No unique commits — merge concept doesn't apply
+        if [[ "$IS_DIRTY" == true ]]; then
+            echo "   🚧 Has uncommitted work — review before removing"
+        else
+            echo "   🗑️  No commits, no changes — candidate for removal"
+            REMOVAL_CANDIDATES+=("$WT_NAME")
+        fi
+    else
+        # Has commits — check if they've been merged
+        MERGED=false
+        WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)
+        if git merge-base --is-ancestor "$WT_HEAD" "$BASE_BRANCH" 2>/dev/null; then
+            MERGED=true
+        else
+            # Also check if branch has been merged via squash/rebase
+            # by seeing if the diff between this branch and base is empty
+            DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${BASE_BRANCH}..HEAD" --stat 2>/dev/null | tail -1)
+            if [[ -z "$DIFF_TO_MAIN" ]]; then
+                MERGED=true
+            fi
+        fi
+
+        if [[ "$MERGED" == true ]]; then
+            if [[ "$IS_DIRTY" == true ]]; then
+                echo "   ✅ Merged into ${BASE_BRANCH}: Yes"
+                echo "   🚧 NOT a removal candidate — has ${DIRTY_COUNT} uncommitted file(s)"
+            else
+                echo "   ✅ Merged into ${BASE_BRANCH}: Yes — candidate for removal"
+                REMOVAL_CANDIDATES+=("$WT_NAME")
+            fi
+        else
+            echo "   ❌ Merged into ${BASE_BRANCH}: No"
+        fi
+    fi
+
+    echo ""
+done
+
+# --- Summary ---
+echo "=================================="
+if [[ ${#REMOVAL_CANDIDATES[@]} -gt 0 ]]; then
+    echo "🗑️  Removal candidates (merged into ${BASE_BRANCH}):"
+    for NAME in "${REMOVAL_CANDIDATES[@]}"; do
+        echo "   - ${NAME}  →  wt-remove ${NAME} -y"
+    done
+else
+    echo "✨ No worktrees are ready for removal."
+fi
