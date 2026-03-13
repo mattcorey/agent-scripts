@@ -15,11 +15,11 @@ usage() {
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Output per worktree:"
-    echo "  - Branch name and commit count ahead of main"
+    echo "  - Branch name and commit count ahead of base branch"
     echo "  - First and last commit dates"
     echo "  - Diff stat (files changed, insertions, deletions)"
     echo "  - Whether pushed to origin"
-    echo "  - Whether merged into main"
+    echo "  - Whether merged into base branch"
     echo "  - Uncommitted changes warning"
     echo ""
     echo "Examples:"
@@ -52,8 +52,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Ensure we're on the main worktree so main ref is available
+# Ensure we're on the main worktree so base ref is available
 MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+
+# Detect the default branch (main, master, trunk, etc.)
+BASE_BRANCH=""
+if REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+    BASE_BRANCH=${REF#refs/remotes/origin/}
+fi
+# Fallback: check common names if origin/HEAD isn't set
+if [[ -z "$BASE_BRANCH" ]]; then
+    for CANDIDATE in main master trunk; do
+        if git rev-parse --verify "$CANDIDATE" >/dev/null 2>&1; then
+            BASE_BRANCH="$CANDIDATE"
+            break
+        fi
+    done
+fi
+if [[ -z "$BASE_BRANCH" ]]; then
+    echo "Error: Could not detect default branch (tried origin/HEAD, main, master, trunk)"
+    exit 1
+fi
 
 PROJECT_NAME=$(basename "$MAIN_WORKTREE")
 echo "🌿 Worktree Status for ${PROJECT_NAME}"
@@ -108,24 +127,24 @@ for i in "${!WORKTREES[@]}"; do
     echo "   🌿 Branch: ${BRANCH}"
     echo "   📍 Path: ${WT_PATH}"
 
-    # --- Commits ahead of main ---
-    COMMIT_COUNT=$(git -C "$WT_PATH" rev-list --count main..HEAD 2>/dev/null || echo "0")
-    echo "   📊 Commits ahead of main: ${COMMIT_COUNT}"
+    # --- Commits ahead of base branch ---
+    COMMIT_COUNT=$(git -C "$WT_PATH" rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+    echo "   📊 Commits ahead of ${BASE_BRANCH}: ${COMMIT_COUNT}"
 
     if [[ "$COMMIT_COUNT" -gt 0 ]]; then
         # First commit on branch
-        FIRST_COMMIT=$(git -C "$WT_PATH" log main..HEAD --reverse --format="%ai | %s" 2>/dev/null | head -1)
-        LAST_COMMIT=$(git -C "$WT_PATH" log main..HEAD --format="%ai | %s" 2>/dev/null | head -1)
+        FIRST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --reverse --format="%ai | %s" 2>/dev/null | head -1)
+        LAST_COMMIT=$(git -C "$WT_PATH" log "${BASE_BRANCH}..HEAD" --format="%ai | %s" 2>/dev/null | head -1)
         echo "   🕐 First commit: ${FIRST_COMMIT}"
         echo "   🕐 Last commit:  ${LAST_COMMIT}"
 
         # Diff stat summary
-        DIFF_STAT=$(git -C "$WT_PATH" diff --shortstat main..HEAD 2>/dev/null || echo "")
+        DIFF_STAT=$(git -C "$WT_PATH" diff --shortstat "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "")
         if [[ -n "$DIFF_STAT" ]]; then
             echo "   📝 Changes:${DIFF_STAT}"
         fi
     else
-        echo "   📝 No unique commits (branch tip equals main)"
+        echo "   📝 No unique commits (branch tip equals ${BASE_BRANCH})"
     fi
 
     # --- Uncommitted changes ---
@@ -144,7 +163,7 @@ for i in "${!WORKTREES[@]}"; do
         echo "   ☁️  Pushed to origin: No"
     fi
 
-    # --- Merged into main / removal candidate ---
+    # --- Merged into base branch / removal candidate ---
     if [[ "$COMMIT_COUNT" -eq 0 ]]; then
         # No unique commits — merge concept doesn't apply
         if [[ "$IS_DIRTY" == true ]]; then
@@ -157,12 +176,12 @@ for i in "${!WORKTREES[@]}"; do
         # Has commits — check if they've been merged
         MERGED=false
         WT_HEAD=$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)
-        if git merge-base --is-ancestor "$WT_HEAD" main 2>/dev/null; then
+        if git merge-base --is-ancestor "$WT_HEAD" "$BASE_BRANCH" 2>/dev/null; then
             MERGED=true
         else
             # Also check if branch has been merged via squash/rebase
-            # by seeing if the diff between this branch and main is empty
-            DIFF_TO_MAIN=$(git -C "$WT_PATH" diff main..HEAD --stat 2>/dev/null | tail -1)
+            # by seeing if the diff between this branch and base is empty
+            DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${BASE_BRANCH}..HEAD" --stat 2>/dev/null | tail -1)
             if [[ -z "$DIFF_TO_MAIN" ]]; then
                 MERGED=true
             fi
@@ -170,14 +189,14 @@ for i in "${!WORKTREES[@]}"; do
 
         if [[ "$MERGED" == true ]]; then
             if [[ "$IS_DIRTY" == true ]]; then
-                echo "   ✅ Merged into main: Yes"
+                echo "   ✅ Merged into ${BASE_BRANCH}: Yes"
                 echo "   🚧 NOT a removal candidate — has ${DIRTY_COUNT} uncommitted file(s)"
             else
-                echo "   ✅ Merged into main: Yes — candidate for removal"
+                echo "   ✅ Merged into ${BASE_BRANCH}: Yes — candidate for removal"
                 REMOVAL_CANDIDATES+=("$WT_NAME")
             fi
         else
-            echo "   ❌ Merged into main: No"
+            echo "   ❌ Merged into ${BASE_BRANCH}: No"
         fi
     fi
 
@@ -187,7 +206,7 @@ done
 # --- Summary ---
 echo "=================================="
 if [[ ${#REMOVAL_CANDIDATES[@]} -gt 0 ]]; then
-    echo "🗑️  Removal candidates (merged into main):"
+    echo "🗑️  Removal candidates (merged into ${BASE_BRANCH}):"
     for NAME in "${REMOVAL_CANDIDATES[@]}"; do
         echo "   - ${NAME}  →  wt-remove ${NAME} -y"
     done
