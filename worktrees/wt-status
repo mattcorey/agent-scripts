@@ -230,7 +230,12 @@ for i in "${!WORKTREES[@]}"; do
         fi
     else
         # Check squash/rebase merge (diff is empty even though commits differ)
-        DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${REMOTE_BASE}..HEAD" --stat 2>/dev/null | tail -1)
+        # Skip this check if the remote base ref is missing to avoid false positives
+        if [[ -n "$REMOTE_BASE_HEAD" ]]; then
+            DIFF_TO_MAIN=$(git -C "$WT_PATH" diff "${REMOTE_BASE}..HEAD" --stat 2>/dev/null | tail -1)
+        else
+            DIFF_TO_MAIN="unknown"
+        fi
         if [[ -z "$DIFF_TO_MAIN" ]]; then
             if [[ "$IS_DIRTY" == true ]]; then
                 echo "   ✅ Merged into ${BASE_BRANCH} (squash/rebase)"
