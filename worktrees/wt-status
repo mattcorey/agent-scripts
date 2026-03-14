@@ -150,11 +150,12 @@ for i in "${!WORKTREES[@]}"; do
     fi
 
     # Was this branch ever a real feature branch that got merged?
-    # Check if origin/main has a merge commit referencing this branch name.
-    # This avoids false positives for branches that are simply behind main.
+    # Check if origin/main has a merge commit whose subject ends with this
+    # exact branch name (after "/"). Using grep with end-of-line anchor
+    # prevents partial matches (e.g., "feature-1" matching "feature-123").
     WAS_MERGED_BRANCH=false
     if [[ "$IS_MERGED" == true ]]; then
-        MERGE_COMMIT=$(git log --merges --oneline "$REMOTE_BASE" --grep="$BRANCH" 2>/dev/null | head -1)
+        MERGE_COMMIT=$(git log --merges --format="%s" "$REMOTE_BASE" 2>/dev/null | grep "/${BRANCH}$" | head -1)
         if [[ -n "$MERGE_COMMIT" ]]; then
             WAS_MERGED_BRANCH=true
         fi
