@@ -12,7 +12,8 @@ usage() {
     echo "Shows detailed status for all worktrees (or a specific one)."
     echo ""
     echo "Options:"
-    echo "  -h, --help       Show this help message"
+    echo "  -h, --help               Show this help message"
+    echo "  --staleness-days N       Days of inactivity before flagging as abandoned (default: 30)"
     echo ""
     echo "Output per worktree:"
     echo "  - Branch name and commit count ahead of base branch"
@@ -36,10 +37,19 @@ fi
 
 # Parse arguments
 FILTER_NAME=""
+STALENESS_DAYS=30
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
             usage
+            ;;
+        --staleness-days)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo "Error: --staleness-days requires a numeric argument"
+                exit 1
+            fi
+            STALENESS_DAYS="$2"
+            shift 2
             ;;
         -*)
             echo "Unknown option: $1"
@@ -84,6 +94,39 @@ git fetch --prune origin >/dev/null 2>&1 || echo "   ⚠️  Could not fetch fro
 REMOTE_BASE="origin/${BASE_BRANCH}"
 echo ""
 
+# Compute last activity epoch for a worktree (max of last commit date and newest dirty file mtime)
+compute_last_activity_epoch() {
+    local wt_path="$1"
+    local remote_base="$2"
+    local max_epoch=0
+
+    # Last commit date (unix epoch) — check branch-specific commits first, fall back to HEAD
+    local commit_epoch
+    commit_epoch=$(git -C "$wt_path" log -1 --format="%ct" "${remote_base}..HEAD" 2>/dev/null || echo "0")
+    if [[ -z "$commit_epoch" || "$commit_epoch" == "0" ]]; then
+        # No branch-specific commits; use HEAD's commit time (e.g., sitting on main)
+        commit_epoch=$(git -C "$wt_path" log -1 --format="%ct" HEAD 2>/dev/null || echo "0")
+    fi
+    if [[ "$commit_epoch" -gt "$max_epoch" ]]; then
+        max_epoch=$commit_epoch
+    fi
+
+    # Newest uncommitted file mtime (unix epoch)
+    while IFS= read -r -d '' entry; do
+        # porcelain -z format: XY<space>filename<NUL> — strip the 3-char prefix
+        local file="${entry:3}"
+        if [[ -f "$wt_path/$file" ]]; then
+            local mtime
+            mtime=$(stat -f "%m" "$wt_path/$file" 2>/dev/null || echo "0")
+            if [[ "$mtime" -gt "$max_epoch" ]]; then
+                max_epoch=$mtime
+            fi
+        fi
+    done < <(git -C "$wt_path" status --porcelain -z 2>/dev/null)
+
+    echo "$max_epoch"
+}
+
 # Collect worktree paths and branches
 WORKTREES=()
 BRANCHES=()
@@ -122,6 +165,13 @@ if [[ ${#WORKTREES[@]} -eq 0 ]]; then
 fi
 
 REMOVAL_CANDIDATES=()
+ABANDONED_CANDIDATES=()
+ABANDONED_DAYS_AGO=()
+IN_PROGRESS=()
+IN_PROGRESS_DAYS_AGO=()
+
+NOW_EPOCH=$(date +%s)
+STALENESS_SECONDS=$((STALENESS_DAYS * 86400))
 
 for i in "${!WORKTREES[@]}"; do
     WT_PATH="${WORKTREES[$i]}"
@@ -250,16 +300,78 @@ for i in "${!WORKTREES[@]}"; do
         fi
     fi
 
+    # --- Last activity & category ---
+    LAST_ACTIVITY_EPOCH=$(compute_last_activity_epoch "$WT_PATH" "$REMOTE_BASE")
+    if [[ "$LAST_ACTIVITY_EPOCH" -gt 0 ]]; then
+        LAST_ACTIVITY_DATE=$(date -r "$LAST_ACTIVITY_EPOCH" "+%Y-%m-%d")
+        DAYS_AGO=$(( (NOW_EPOCH - LAST_ACTIVITY_EPOCH) / 86400 ))
+        if [[ "$DAYS_AGO" -eq 1 ]]; then
+            DAYS_LABEL="1 day ago"
+        else
+            DAYS_LABEL="${DAYS_AGO} days ago"
+        fi
+        echo "   🕰️  Last activity: ${LAST_ACTIVITY_DATE} (${DAYS_LABEL})"
+    else
+        DAYS_AGO=0
+        DAYS_LABEL="unknown"
+    fi
+
+    # Assign category (removal candidates already handled above)
+    IS_REMOVAL=false
+    for rc in "${REMOVAL_CANDIDATES[@]}"; do
+        if [[ "$rc" == "$WT_NAME" ]]; then
+            IS_REMOVAL=true
+            break
+        fi
+    done
+
+    if [[ "$IS_REMOVAL" == false ]]; then
+        if [[ "$LAST_ACTIVITY_EPOCH" -gt 0 && $((NOW_EPOCH - LAST_ACTIVITY_EPOCH)) -gt $STALENESS_SECONDS ]]; then
+            echo "   💤 Status: Possible abandoned work"
+            ABANDONED_CANDIDATES+=("$WT_NAME")
+            ABANDONED_DAYS_AGO+=("$DAYS_AGO")
+        else
+            echo "   🔧 Status: In progress"
+            IN_PROGRESS+=("$WT_NAME")
+            IN_PROGRESS_DAYS_AGO+=("$DAYS_AGO")
+        fi
+    fi
+
     echo ""
 done
 
 # --- Summary ---
 echo "=================================="
+
+HAS_OUTPUT=false
+
 if [[ ${#REMOVAL_CANDIDATES[@]} -gt 0 ]]; then
-    echo "🗑️  Removal candidates (merged into ${BASE_BRANCH}):"
+    HAS_OUTPUT=true
+    echo "🗑️  Removal candidates (merged, safe to remove):"
     for NAME in "${REMOVAL_CANDIDATES[@]}"; do
         echo "   - ${NAME}  →  wt-remove ${NAME} -y"
     done
-else
-    echo "✨ No worktrees are ready for removal."
+    echo ""
+fi
+
+if [[ ${#ABANDONED_CANDIDATES[@]} -gt 0 ]]; then
+    HAS_OUTPUT=true
+    echo "💤 Possible abandoned work (no activity in ${STALENESS_DAYS}+ days):"
+    for j in "${!ABANDONED_CANDIDATES[@]}"; do
+        echo "   - ${ABANDONED_CANDIDATES[$j]} (${ABANDONED_DAYS_AGO[$j]} days)"
+    done
+    echo ""
+fi
+
+if [[ ${#IN_PROGRESS[@]} -gt 0 ]]; then
+    HAS_OUTPUT=true
+    echo "🔧 In progress:"
+    for j in "${!IN_PROGRESS[@]}"; do
+        echo "   - ${IN_PROGRESS[$j]} (${IN_PROGRESS_DAYS_AGO[$j]} days)"
+    done
+    echo ""
+fi
+
+if [[ "$HAS_OUTPUT" == false ]]; then
+    echo "✨ No worktrees found."
 fi
