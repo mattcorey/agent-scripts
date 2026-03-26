@@ -1,0 +1,583 @@
+#!/bin/bash
+
+# xc-ci - Local CI pipeline replicating Xcode Cloud
+# Pipeline: Test iOS → Build-check visionOS → Archive+upload iOS → Archive+upload visionOS
+
+set -e
+
+# ─── Defaults ────────────────────────────────────────────────────────────────
+
+REPO_URL="git@github.com:mattcorey/MoneyMaster.git"
+BRANCH="main"
+SCHEME=""
+SKIP_TESTS=false
+IOS_ONLY=false
+VISIONOS_ONLY=false
+KEEP_WORKSPACE=false
+VERBOSE=false
+APP_ID="1636872963"
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ─── State tracking ─────────────────────────────────────────────────────────
+
+STEP_RESULTS=()
+WORK_DIR=""
+PIPELINE_START=$SECONDS
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+show_help() {
+    cat << 'EOF'
+xc-ci - Local CI pipeline for Bills to Budget
+
+Replicates the Xcode Cloud "Build, Test and Archive - main" workflow locally
+with clean, isolated builds.
+
+Pipeline:
+  1. Clone repo into isolated temp workspace
+  2. Resolve SPM dependencies
+  3. Test iOS (builds + runs tests)
+  4. Build-check visionOS (compilation validation)
+  5. Archive + upload iOS to App Store Connect
+  6. Archive + upload visionOS to App Store Connect
+
+Builds are uploaded directly to ASC. Internal TestFlight testers
+receive them automatically. Build numbers are auto-managed by ASC.
+
+Usage: xc-ci [OPTIONS]
+
+Options:
+  --repo <url>         Git repo SSH URL
+                       [default: git@github.com:mattcorey/MoneyMaster.git]
+  --branch <branch>    Branch to build [default: main]
+  --scheme <scheme>    Xcode scheme [default: auto-detect]
+  --skip-tests         Skip the iOS test phase
+  --ios-only           Only test + archive for iOS (skip visionOS)
+  --visionos-only      Only build-check + archive for visionOS (skip iOS)
+  --keep-workspace     Don't clean up temp directory on exit
+  --verbose            Show full xcodebuild output
+  -h, --help           Show this help message
+
+Examples:
+  xc-ci                          # Full pipeline
+  xc-ci --ios-only               # iOS only (test + archive + upload)
+  xc-ci --skip-tests --ios-only  # Archive + upload iOS only, no tests
+  xc-ci --keep-workspace         # Keep temp dir for inspection
+
+EOF
+}
+
+log_step() {
+    echo ""
+    echo -e "${BLUE}${BOLD}━━━ $1 ━━━${NC}"
+    echo ""
+}
+
+log_ok() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+log_fail() {
+    echo -e "${RED}✗ $1${NC}"
+}
+
+log_warn() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+log_info() {
+    echo -e "${DIM}  $1${NC}"
+}
+
+format_duration() {
+    local secs=$1
+    if [ "$secs" -ge 60 ]; then
+        printf "%dm %ds" $((secs / 60)) $((secs % 60))
+    else
+        printf "%ds" "$secs"
+    fi
+}
+
+STEP_START=$SECONDS
+
+step_timer_start() {
+    STEP_START=$SECONDS
+}
+
+record_step() {
+    local name="$1"
+    local status="$2"  # PASS, FAIL, or SKIP
+    local elapsed=$((SECONDS - STEP_START))
+    STEP_RESULTS+=("$status|$name|$elapsed")
+}
+
+print_summary() {
+    local total_elapsed=$((SECONDS - PIPELINE_START))
+    echo ""
+    echo -e "${BOLD}━━━ PIPELINE SUMMARY ━━━${NC}"
+    echo ""
+    for entry in "${STEP_RESULTS[@]}"; do
+        local status="${entry%%|*}"
+        local rest="${entry#*|}"
+        local name="${rest%%|*}"
+        local elapsed="${rest#*|}"
+        local duration
+        duration=$(format_duration "$elapsed")
+        if [ "$status" = "PASS" ]; then
+            echo -e "  ${GREEN}✓${NC} $name ${DIM}($duration)${NC}"
+        elif [ "$status" = "SKIP" ]; then
+            echo -e "  ${DIM}– $name (skipped)${NC}"
+        else
+            echo -e "  ${RED}✗${NC} $name ${DIM}($duration)${NC}"
+        fi
+    done
+    echo ""
+    echo -e "  ${BOLD}Total: $(format_duration "$total_elapsed")${NC}"
+    echo ""
+}
+
+cleanup() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+        if [ "$KEEP_WORKSPACE" = true ]; then
+            log_warn "Keeping workspace: $WORK_DIR"
+        else
+            log_info "Cleaning up workspace..."
+            rm -rf "$WORK_DIR"
+        fi
+    fi
+}
+
+run_xcodebuild() {
+    local label="$1"
+    shift
+    local temp_output
+    temp_output=$(mktemp)
+
+    if [ "$VERBOSE" = true ]; then
+        set +e
+        xcodebuild "$@" 2>&1 | tee "$temp_output"
+        local result=${PIPESTATUS[0]}
+        set -e
+    else
+        set +e
+        xcodebuild "$@" > "$temp_output" 2>&1
+        local result=$?
+        set -e
+    fi
+
+    if [ $result -ne 0 ]; then
+        # Parse and show errors
+        local errors
+        errors=$(grep -E "^[^:]+:[0-9]+:[0-9]+: error:" "$temp_output" | head -20)
+        local generic_errors
+        generic_errors=$(grep -E "(error:|ERROR:)" "$temp_output" | grep -v "^[^:]*:[0-9]*:[0-9]*:" | head -10)
+
+        if [ -n "$errors" ]; then
+            echo ""
+            echo -e "${RED}Build errors:${NC}"
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                local file
+                file=$(echo "$line" | sed 's/:.*$//' | xargs basename 2>/dev/null || echo "$line")
+                local linenum
+                linenum=$(echo "$line" | cut -d: -f2)
+                local message
+                message=$(echo "$line" | sed 's/^[^:]*:[^:]*:[^:]*: error: *//')
+                echo -e "  ${RED}✗${NC} $file:$linenum — $message"
+            done <<< "$errors"
+        elif [ -n "$generic_errors" ]; then
+            echo ""
+            echo -e "${RED}Errors:${NC}"
+            echo "$generic_errors" | head -10 | while IFS= read -r line; do
+                echo -e "  ${RED}✗${NC} $line"
+            done
+        fi
+
+        # Check for common issues
+        if grep -q "No such module" "$temp_output"; then
+            log_warn "Missing module — check SPM dependencies"
+        fi
+        if grep -q "Command PhaseScriptExecution failed" "$temp_output"; then
+            log_warn "Build script phase failed"
+        fi
+
+        rm -f "$temp_output"
+        return $result
+    fi
+
+    # Show warnings even on success
+    local warnings
+    warnings=$(grep -E "^[^:]+:[0-9]+:[0-9]+: warning:" "$temp_output" | head -10)
+    if [ -n "$warnings" ]; then
+        local wcount
+        wcount=$(echo "$warnings" | wc -l | tr -d ' ')
+        log_warn "$label completed with $wcount warning(s)"
+    fi
+
+    rm -f "$temp_output"
+    return 0
+}
+
+detect_scheme() {
+    # Uses global PROJECT_ARG_ARRAY
+    # All log output goes to stderr so stdout is clean for the return value
+    log_info "Detecting scheme..." >&2
+    local list_output
+    list_output=$(xcodebuild "${PROJECT_ARG_ARRAY[@]}" -list 2>&1)
+
+    local all_schemes
+    all_schemes=$(echo "$list_output" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}')
+
+    if [ -z "$all_schemes" ]; then
+        all_schemes=$(echo "$list_output" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//')
+    fi
+
+    # Prefer main app schemes
+    local scheme
+    scheme=$(echo "$all_schemes" | grep -E "^(MoneyMaster|Bills To Budget|BillsToBudget)$" | head -1)
+
+    if [ -z "$scheme" ]; then
+        scheme=$(echo "$all_schemes" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
+    fi
+
+    if [ -z "$scheme" ]; then
+        scheme=$(echo "$all_schemes" | head -1)
+    fi
+
+    if [ -z "$scheme" ]; then
+        log_fail "No schemes found" >&2
+        echo "Available output:" >&2
+        echo "$list_output" >&2
+        return 1
+    fi
+
+    echo "$scheme"
+}
+
+generate_export_plist() {
+    local plist_path="$1"
+    cat > "$plist_path" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <key>destination</key>
+    <string>upload</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+</dict>
+</plist>
+PLIST
+}
+
+# ─── Argument parsing ────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --repo)
+            REPO_URL="$2"; shift 2 ;;
+        --repo=*)
+            REPO_URL="${1#*=}"; shift ;;
+        --branch)
+            BRANCH="$2"; shift 2 ;;
+        --branch=*)
+            BRANCH="${1#*=}"; shift ;;
+        --scheme)
+            SCHEME="$2"; shift 2 ;;
+        --scheme=*)
+            SCHEME="${1#*=}"; shift ;;
+        --skip-tests)
+            SKIP_TESTS=true; shift ;;
+        --ios-only)
+            IOS_ONLY=true; shift ;;
+        --visionos-only)
+            VISIONOS_ONLY=true; shift ;;
+        --keep-workspace)
+            KEEP_WORKSPACE=true; shift ;;
+        --verbose)
+            VERBOSE=true; shift ;;
+        -h|--help)
+            show_help; exit 0 ;;
+        *)
+            echo "Unknown option: $1"
+            show_help; exit 1 ;;
+    esac
+done
+
+if [ "$IOS_ONLY" = true ] && [ "$VISIONOS_ONLY" = true ]; then
+    echo -e "${RED}Cannot specify both --ios-only and --visionos-only${NC}"
+    exit 1
+fi
+
+# ─── Trap for cleanup ────────────────────────────────────────────────────────
+
+trap cleanup EXIT
+
+# ─── Step 1: Clone ───────────────────────────────────────────────────────────
+
+log_step "Step 1/6: Clone into isolated workspace"
+
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp/}xc-ci-XXXXXXXX")
+DERIVED_DATA="$WORK_DIR/DerivedData"
+mkdir -p "$DERIVED_DATA"
+
+log_info "Workspace: $WORK_DIR"
+log_info "Cloning $BRANCH from $REPO_URL..."
+
+git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$WORK_DIR/repo"
+cd "$WORK_DIR/repo"
+
+log_ok "Cloned $(git log -1 --format='%h %s')"
+
+# Detect project/workspace — use array to handle spaces in names
+PROJECT_ARG_ARRAY=()
+if ls *.xcworkspace 1>/dev/null 2>&1; then
+    WORKSPACE=$(ls -d *.xcworkspace | head -1)
+    PROJECT_ARG_ARRAY=(-workspace "$WORKSPACE")
+    log_info "Using workspace: $WORKSPACE"
+elif ls *.xcodeproj 1>/dev/null 2>&1; then
+    PROJECT=$(ls -d *.xcodeproj | head -1)
+    PROJECT_ARG_ARRAY=(-project "$PROJECT")
+    log_info "Using project: $PROJECT"
+else
+    log_fail "No Xcode project or workspace found"
+    exit 1
+fi
+
+# Detect scheme
+if [ -z "$SCHEME" ]; then
+    SCHEME=$(detect_scheme)
+fi
+log_ok "Scheme: $SCHEME"
+
+# ─── Step 2: Resolve dependencies ────────────────────────────────────────────
+
+step_timer_start
+log_step "Step 2/6: Resolve SPM dependencies"
+
+if run_xcodebuild "SPM resolve" \
+    "${PROJECT_ARG_ARRAY[@]}" \
+    -scheme "$SCHEME" \
+    -resolvePackageDependencies \
+    -derivedDataPath "$DERIVED_DATA"; then
+    log_ok "Dependencies resolved"
+    record_step "Resolve dependencies" "PASS"
+else
+    log_fail "Failed to resolve dependencies"
+    record_step "Resolve dependencies" "FAIL"
+    print_summary
+    exit 1
+fi
+
+# ─── Compute shared build number ─────────────────────────────────────────────
+
+log_info "Querying App Store Connect for latest build number..."
+LATEST_BUILD=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null \
+    | jq -r '[.data[].attributes.version | tonumber] | max' 2>/dev/null || echo "0")
+LATEST_BUILD=${LATEST_BUILD:-0}
+BUILD_NUMBER=$((LATEST_BUILD + 1))
+log_ok "Build number: $BUILD_NUMBER (previous: $LATEST_BUILD)"
+
+# ─── Step 3: Test iOS ────────────────────────────────────────────────────────
+
+DO_IOS=true
+DO_VISIONOS=true
+if [ "$IOS_ONLY" = true ]; then DO_VISIONOS=false; fi
+if [ "$VISIONOS_ONLY" = true ]; then DO_IOS=false; fi
+
+if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
+    step_timer_start
+    log_step "Step 3/6: Test iOS"
+
+    # Find the best available iPhone simulator: prefer Pro Max, then Pro, then any
+    IOS_SIM_ID=$(xcrun simctl list devices available -j \
+        | jq -r '
+            [.devices[][] | select(.name | test("^iPhone")) | select(.isAvailable == true)]
+            | (map(select(.name | test("Pro Max"))) | first)
+              // (map(select(.name | test("Pro"))) | first)
+              // first
+            | .udid
+        ' 2>/dev/null)
+    if [ -z "$IOS_SIM_ID" ] || [ "$IOS_SIM_ID" = "null" ]; then
+        log_fail "No available iPhone simulator found"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+    IOS_SIM_NAME=$(xcrun simctl list devices available -j \
+        | jq -r --arg id "$IOS_SIM_ID" '.devices[][] | select(.udid == $id) | .name' 2>/dev/null)
+    log_info "Using simulator: $IOS_SIM_NAME ($IOS_SIM_ID)"
+
+    RESULT_BUNDLE="$WORK_DIR/test_results.xcresult"
+
+    if run_xcodebuild "iOS tests" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "platform=iOS Simulator,id=$IOS_SIM_ID" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -resultBundlePath "$RESULT_BUNDLE" \
+        -configuration Debug \
+        test; then
+
+        # Parse test results
+        if [ -d "$RESULT_BUNDLE" ]; then
+            TEST_JSON=$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json 2>/dev/null || echo "{}")
+            if command -v jq >/dev/null 2>&1; then
+                PASSED=$(echo "$TEST_JSON" | jq -r '[.devicesAndConfigurations[]?.passedTests // 0] | add' 2>/dev/null || echo "0")
+                FAILED=$(echo "$TEST_JSON" | jq -r '[.devicesAndConfigurations[]?.failedTests // 0] | add' 2>/dev/null || echo "0")
+            else
+                PASSED=$(echo "$TEST_JSON" | grep -o '"passedTests"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' | head -1 || echo "0")
+                FAILED=$(echo "$TEST_JSON" | grep -o '"failedTests"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' | head -1 || echo "0")
+            fi
+            PASSED=${PASSED:-0}
+            FAILED=${FAILED:-0}
+            log_ok "Tests passed: $PASSED passed, $FAILED failed"
+        else
+            log_ok "Tests passed"
+        fi
+        record_step "Test iOS" "PASS"
+    else
+        log_fail "iOS tests failed"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+elif [ "$DO_IOS" = true ]; then
+    log_info "Skipping iOS tests (--skip-tests)"
+    record_step "Test iOS" "SKIP"
+else
+    record_step "Test iOS" "SKIP"
+fi
+
+# ─── Step 4: Build-check visionOS ────────────────────────────────────────────
+
+if [ "$DO_VISIONOS" = true ]; then
+    step_timer_start
+    log_step "Step 4/6: Build-check visionOS"
+
+    if run_xcodebuild "visionOS build" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "generic/platform=visionOS Simulator" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -configuration Debug \
+        build; then
+        log_ok "visionOS compilation check passed"
+        record_step "Build-check visionOS" "PASS"
+    else
+        log_fail "visionOS does not compile"
+        record_step "Build-check visionOS" "FAIL"
+        print_summary
+        exit 2
+    fi
+else
+    record_step "Build-check visionOS" "SKIP"
+fi
+
+# ─── Step 5: Archive iOS ─────────────────────────────────────────────────────
+
+EXPORT_PLIST="$WORK_DIR/ExportOptions.plist"
+generate_export_plist "$EXPORT_PLIST"
+
+if [ "$DO_IOS" = true ]; then
+    step_timer_start
+    log_step "Step 5/6: Archive + upload iOS"
+
+    IOS_ARCHIVE="$WORK_DIR/ios.xcarchive"
+
+    log_info "Archiving (build $BUILD_NUMBER)..."
+    if run_xcodebuild "iOS archive" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "generic/platform=iOS" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -archivePath "$IOS_ARCHIVE" \
+        -configuration Release \
+        CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+        archive; then
+        log_ok "iOS archive created"
+    else
+        log_fail "iOS archive failed"
+        record_step "Archive + upload iOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Uploading to App Store Connect..."
+    if run_xcodebuild "iOS upload" \
+        -exportArchive \
+        -archivePath "$IOS_ARCHIVE" \
+        -exportPath "$WORK_DIR/ios-export" \
+        -exportOptionsPlist "$EXPORT_PLIST"; then
+        log_ok "iOS build uploaded to App Store Connect"
+        record_step "Archive + upload iOS" "PASS"
+    else
+        log_fail "iOS upload failed"
+        record_step "Archive + upload iOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+else
+    record_step "Archive + upload iOS" "SKIP"
+fi
+
+# ─── Step 6: Archive visionOS ────────────────────────────────────────────────
+
+if [ "$DO_VISIONOS" = true ]; then
+    step_timer_start
+    log_step "Step 6/6: Archive + upload visionOS"
+
+    VISIONOS_ARCHIVE="$WORK_DIR/visionos.xcarchive"
+
+    log_info "Archiving (build $BUILD_NUMBER)..."
+    if run_xcodebuild "visionOS archive" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "generic/platform=visionOS" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -archivePath "$VISIONOS_ARCHIVE" \
+        -configuration Release \
+        CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+        archive; then
+        log_ok "visionOS archive created"
+    else
+        log_fail "visionOS archive failed"
+        record_step "Archive + upload visionOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Uploading to App Store Connect..."
+    if run_xcodebuild "visionOS upload" \
+        -exportArchive \
+        -archivePath "$VISIONOS_ARCHIVE" \
+        -exportPath "$WORK_DIR/visionos-export" \
+        -exportOptionsPlist "$EXPORT_PLIST"; then
+        log_ok "visionOS build uploaded to App Store Connect"
+        record_step "Archive + upload visionOS" "PASS"
+    else
+        log_fail "visionOS upload failed"
+        record_step "Archive + upload visionOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+else
+    record_step "Archive + upload visionOS" "SKIP"
+fi
+
+# ─── Done ─────────────────────────────────────────────────────────────────────
+
+print_summary
+echo -e "${GREEN}${BOLD}Pipeline complete!${NC}"
+exit 0
