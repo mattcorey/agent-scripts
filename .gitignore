@@ -16,3 +16,5 @@
 # Temporary files
 *.tmp
 *.temp
+
+.claude
