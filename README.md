@@ -93,11 +93,65 @@ wt-find-deriveddata --current
 wt-find-deriveddata MyProject-feature --verbose
 ```
 
+### xcode-agent-tools/
+
+Xcode build, test, and CI utilities.
+
+#### `xc-build`
+Simplified Xcode build with clear error reporting.
+
+**Usage:** `xc-build [options]`
+
+**Options:**
+- `-p, --platform <platform>` - Platform: iOS, macOS, visionOS [default: iOS]
+- `-v, --version <version>` - OS version [default: 26.0]
+- `-s, --scheme <scheme>` - Specific scheme to build
+- `--verbose` - Show full xcodebuild output
+
+#### `xc-test`
+Simplified Xcode test runner with clear results and isolation commands for failures.
+
+**Usage:** `xc-test [options]`
+
+**Options:**
+- `-p, --platform <platform>` - Platform: iOS, macOS, visionOS [default: iOS]
+- `-s, --scheme <scheme>` - Specific scheme to test
+- `-d, --device <device>` - Device name [default: iPhone 16]
+- `-t, --test <test>` - Run specific test class or method
+- `--verbose` - Show full xcodebuild output
+
+#### `xc-ci`
+Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp workspace and runs: test iOS, build-check visionOS, archive + upload both platforms to App Store Connect.
+
+**Usage:** `xc-ci --repo <url> --app-id <id> [options]`
+
+**Required:**
+- `--repo <url>` - Git repo SSH URL
+- `--app-id <id>` - App Store Connect app ID (numeric)
+
+**Options:**
+- `--branch <branch>` - Branch to build [default: main]
+- `--scheme <scheme>` - Xcode scheme [default: auto-detect]
+- `--skip-tests` - Skip the iOS test phase
+- `--ios-only` - Only test + archive for iOS (skip visionOS)
+- `--visionos-only` - Only build-check + archive for visionOS (skip iOS)
+- `--keep-workspace` - Don't clean up temp directory on exit
+- `--verbose` - Show full xcodebuild output
+
+**Examples:**
+```bash
+xc-ci --repo git@github.com:user/App.git --app-id 123456789
+xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
+xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
+```
+
 ## Requirements
 
 - Git
 - Bash
-- Xcode (for `wt-find-deriveddata` script)
+- Xcode (for xcode-agent-tools and `wt-find-deriveddata`)
+- [asc CLI](https://github.com/appstoreconnect/asc) (for `xc-ci` upload to App Store Connect)
+- jq (for `xc-ci` build number management)
 
 ## License
 
