@@ -7,7 +7,7 @@ set -e
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
-REPO_URL="git@github.com:mattcorey/MoneyMaster.git"
+REPO_URL=""
 BRANCH="main"
 SCHEME=""
 SKIP_TESTS=false
@@ -15,7 +15,7 @@ IOS_ONLY=false
 VISIONOS_ONLY=false
 KEEP_WORKSPACE=false
 VERBOSE=false
-APP_ID="1636872963"
+APP_ID=""
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -37,10 +37,10 @@ PIPELINE_START=$SECONDS
 
 show_help() {
     cat << 'EOF'
-xc-ci - Local CI pipeline for Bills to Budget
+xc-ci - Local CI pipeline replicating Xcode Cloud
 
-Replicates the Xcode Cloud "Build, Test and Archive - main" workflow locally
-with clean, isolated builds.
+Clones a repo into an isolated temp workspace and runs a full CI pipeline:
+test, build-check, archive, and upload to App Store Connect.
 
 Pipeline:
   1. Clone repo into isolated temp workspace
@@ -51,13 +51,16 @@ Pipeline:
   6. Archive + upload visionOS to App Store Connect
 
 Builds are uploaded directly to ASC. Internal TestFlight testers
-receive them automatically. Build numbers are auto-managed by ASC.
+receive them automatically. Both platforms share a single build
+number queried from ASC.
 
-Usage: xc-ci [OPTIONS]
+Usage: xc-ci --repo <url> --app-id <id> [OPTIONS]
+
+Required:
+  --repo <url>         Git repo SSH URL
+  --app-id <id>        App Store Connect app ID (numeric)
 
 Options:
-  --repo <url>         Git repo SSH URL
-                       [default: git@github.com:mattcorey/MoneyMaster.git]
   --branch <branch>    Branch to build [default: main]
   --scheme <scheme>    Xcode scheme [default: auto-detect]
   --skip-tests         Skip the iOS test phase
@@ -68,10 +71,10 @@ Options:
   -h, --help           Show this help message
 
 Examples:
-  xc-ci                          # Full pipeline
-  xc-ci --ios-only               # iOS only (test + archive + upload)
-  xc-ci --skip-tests --ios-only  # Archive + upload iOS only, no tests
-  xc-ci --keep-workspace         # Keep temp dir for inspection
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --keep-workspace
 
 EOF
 }
@@ -297,6 +300,10 @@ while [[ $# -gt 0 ]]; do
             SCHEME="$2"; shift 2 ;;
         --scheme=*)
             SCHEME="${1#*=}"; shift ;;
+        --app-id)
+            APP_ID="$2"; shift 2 ;;
+        --app-id=*)
+            APP_ID="${1#*=}"; shift ;;
         --skip-tests)
             SKIP_TESTS=true; shift ;;
         --ios-only)
@@ -314,6 +321,20 @@ while [[ $# -gt 0 ]]; do
             show_help; exit 1 ;;
     esac
 done
+
+if [ -z "$REPO_URL" ]; then
+    echo -e "${RED}Error: --repo is required${NC}"
+    echo ""
+    show_help
+    exit 1
+fi
+
+if [ -z "$APP_ID" ]; then
+    echo -e "${RED}Error: --app-id is required${NC}"
+    echo ""
+    show_help
+    exit 1
+fi
 
 if [ "$IOS_ONLY" = true ] && [ "$VISIONOS_ONLY" = true ]; then
     echo -e "${RED}Cannot specify both --ios-only and --visionos-only${NC}"
