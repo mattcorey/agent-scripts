@@ -138,6 +138,10 @@ Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp w
 - `--keep-workspace` - Don't clean up temp directory on exit
 - `--verbose` - Show full xcodebuild output
 
+Build number lookup and uploads use the `asc` CLI. Run `asc auth doctor` before `xc-ci` to verify App Store Connect authentication.
+
+Archive export requires a local distribution signing identity and App Store provisioning profiles. This is a one-time setup per Mac/keychain for the certificate, and per app bundle ID for profiles. `xc-ci` expects installed profiles to be named `xc-ci AppStore <bundle-id>` so it can generate a manual-signing export plist from the archive.
+
 **Examples:**
 ```bash
 xc-ci --repo git@github.com:user/App.git --app-id 123456789
@@ -152,7 +156,3 @@ xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
 - Xcode (for xcode-agent-tools and `wt-find-deriveddata`)
 - [asc CLI](https://github.com/appstoreconnect/asc) (for `xc-ci` upload to App Store Connect)
 - jq (for `xc-ci` build number management)
-
-## License
-
-MIT
