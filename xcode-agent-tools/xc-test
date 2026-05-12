@@ -139,13 +139,7 @@ if [ -z "$SCHEME" ]; then
     fi
     
     # Prefer main app schemes over auxiliary schemes
-    # Look for common main app patterns first
-    SCHEMES=$(echo "$ALL_SCHEMES" | grep -E "^(MoneyMaster|Bills To Budget|BillsToBudget|Main|App)$" | head -1)
-    
-    # If no main app scheme found, avoid auxiliary schemes and pick the first non-auxiliary one
-    if [ -z "$SCHEMES" ]; then
-        SCHEMES=$(echo "$ALL_SCHEMES" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
-    fi
+    SCHEMES=$(echo "$ALL_SCHEMES" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
     
     # If still no scheme, fall back to the first available scheme
     if [ -z "$SCHEMES" ]; then

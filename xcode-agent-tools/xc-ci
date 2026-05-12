@@ -281,13 +281,8 @@ detect_scheme() {
         all_schemes=$(echo "$list_output" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:" | grep -v "^$" | sed 's/^[[:space:]]*//')
     fi
 
-    # Prefer main app schemes
     local scheme
-    scheme=$(echo "$all_schemes" | grep -E "^(MoneyMaster|Bills To Budget|BillsToBudget)$" | head -1)
-
-    if [ -z "$scheme" ]; then
-        scheme=$(echo "$all_schemes" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
-    fi
+    scheme=$(echo "$all_schemes" | grep -v -E "(AppIntents?|Widget|Extension|Tests?|UI|Notification|LiveActivity)" | head -1)
 
     if [ -z "$scheme" ]; then
         scheme=$(echo "$all_schemes" | head -1)
