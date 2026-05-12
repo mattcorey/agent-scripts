@@ -70,6 +70,10 @@ Options:
   --verbose            Show full xcodebuild output
   -h, --help           Show this help message
 
+Authentication:
+  Build number lookup and uploads use the asc CLI. Run `asc auth doctor`
+  before this script to verify App Store Connect authentication.
+
 Examples:
   xc-ci --repo git@github.com:user/App.git --app-id 123456789
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
@@ -230,6 +234,39 @@ run_xcodebuild() {
     return 0
 }
 
+run_asc() {
+    local label="$1"
+    shift
+    local temp_output
+    temp_output=$(mktemp)
+
+    if [ "$VERBOSE" = true ]; then
+        set +e
+        asc "$@" 2>&1 | tee "$temp_output"
+        local result=${PIPESTATUS[0]}
+        set -e
+    else
+        set +e
+        asc "$@" > "$temp_output" 2>&1
+        local result=$?
+        set -e
+    fi
+
+    if [ $result -ne 0 ]; then
+        echo ""
+        echo -e "${RED}${label} failed:${NC}"
+        head -20 "$temp_output" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo -e "  ${RED}✗${NC} $line"
+        done
+        rm -f "$temp_output"
+        return $result
+    fi
+
+    rm -f "$temp_output"
+    return 0
+}
+
 detect_scheme() {
     # Uses global PROJECT_ARG_ARRAY
     # All log output goes to stderr so stdout is clean for the return value
@@ -266,22 +303,133 @@ detect_scheme() {
     echo "$scheme"
 }
 
+xml_escape() {
+    printf '%s' "$1" \
+        | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'
+}
+
+profile_name_for_bundle_id() {
+    echo "xc-ci AppStore $1"
+}
+
+archive_bundle_ids() {
+    local archive_path="$1"
+    local app_path
+    app_path=$(find "$archive_path/Products/Applications" -maxdepth 1 -name '*.app' -type d -print -quit)
+
+    if [ -z "$app_path" ]; then
+        return 1
+    fi
+
+    plutil -extract CFBundleIdentifier raw -o - "$app_path/Info.plist"
+
+    find "$app_path/PlugIns" -maxdepth 2 -name Info.plist -path '*.appex/Info.plist' -print 2>/dev/null \
+        | while IFS= read -r plist; do
+            plutil -extract CFBundleIdentifier raw -o - "$plist"
+        done
+}
+
+ensure_distribution_identity() {
+    if security find-identity -v -p codesigning 2>/dev/null \
+        | grep -Eq '"(Apple|iOS|iPhone) Distribution:'; then
+        return 0
+    fi
+
+    log_fail "No valid Apple/iOS/iPhone Distribution signing identity found in the keychain"
+    log_info "Run the one-time signing setup, then retry xc-ci."
+    return 1
+}
+
+find_installed_profile() {
+    local bundle_id="$1"
+    local expected_name
+    expected_name=$(profile_name_for_bundle_id "$bundle_id")
+    local profile_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+
+    [ -d "$profile_dir" ] || return 1
+
+    find "$profile_dir" -name '*.mobileprovision' -print 2>/dev/null \
+        | while IFS= read -r profile; do
+            local decoded
+            decoded=$(mktemp)
+            if security cms -D -i "$profile" > "$decoded" 2>/dev/null; then
+                local name app_identifier
+                name=$(plutil -extract Name raw -o - "$decoded" 2>/dev/null || true)
+                app_identifier=$(plutil -extract Entitlements.application-identifier raw -o - "$decoded" 2>/dev/null || true)
+                if [ "$name" = "$expected_name" ] && [[ "$app_identifier" = *".$bundle_id" ]]; then
+                    rm -f "$decoded"
+                    echo "$profile"
+                    return 0
+                fi
+            fi
+            rm -f "$decoded"
+        done
+}
+
+ensure_profiles_for_archive() {
+    local archive_path="$1"
+    local missing=false
+    local bundle_ids
+    bundle_ids=$(archive_bundle_ids "$archive_path") || {
+        log_fail "Could not read bundle IDs from archive: $archive_path"
+        return 1
+    }
+
+    while IFS= read -r bundle_id; do
+        [ -z "$bundle_id" ] && continue
+        if [ -z "$(find_installed_profile "$bundle_id")" ]; then
+            log_fail "Missing installed App Store provisioning profile: $(profile_name_for_bundle_id "$bundle_id")"
+            missing=true
+        fi
+    done <<< "$bundle_ids"
+
+    if [ "$missing" = true ]; then
+        log_info "Run the one-time signing setup, then retry xc-ci."
+        return 1
+    fi
+
+    return 0
+}
+
 generate_export_plist() {
     local plist_path="$1"
-    cat > "$plist_path" << 'PLIST'
+    local archive_path="$2"
+    local team_id
+    local bundle_ids
+
+    team_id=$(plutil -extract ApplicationProperties.Team raw -o - "$archive_path/Info.plist")
+    bundle_ids=$(archive_bundle_ids "$archive_path")
+
+    {
+        cat << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>method</key>
-    <string>app-store</string>
+    <string>app-store-connect</string>
     <key>destination</key>
-    <string>upload</string>
+    <string>export</string>
     <key>manageAppVersionAndBuildNumber</key>
     <false/>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>teamID</key>
+    <string>$(xml_escape "$team_id")</string>
+    <key>provisioningProfiles</key>
+    <dict>
+PLIST
+        while IFS= read -r bundle_id; do
+            [ -z "$bundle_id" ] && continue
+            echo "        <key>$(xml_escape "$bundle_id")</key>"
+            echo "        <string>$(xml_escape "$(profile_name_for_bundle_id "$bundle_id")")</string>"
+        done <<< "$bundle_ids"
+        cat << 'PLIST'
+    </dict>
 </dict>
 </plist>
 PLIST
+    } > "$plist_path"
 }
 
 # ─── Argument parsing ────────────────────────────────────────────────────────
@@ -345,6 +493,22 @@ fi
 
 trap cleanup EXIT
 
+# ─── Preflight ───────────────────────────────────────────────────────────────
+
+log_info "Verifying App Store Connect authentication with asc..."
+if run_asc "asc auth doctor" auth doctor; then
+    log_ok "asc authentication verified"
+else
+    log_fail "asc authentication failed"
+    exit 1
+fi
+
+if ensure_distribution_identity; then
+    log_ok "Distribution signing identity found"
+else
+    exit 1
+fi
+
 # ─── Step 1: Clone ───────────────────────────────────────────────────────────
 
 log_step "Step 1/6: Clone into isolated workspace"
@@ -404,8 +568,16 @@ fi
 # ─── Compute shared build number ─────────────────────────────────────────────
 
 log_info "Querying App Store Connect for latest build number..."
-LATEST_BUILD=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null \
-    | jq -r '[.data[].attributes.version | tonumber] | max' 2>/dev/null || echo "0")
+set +e
+BUILDS_JSON=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null)
+BUILDS_RESULT=$?
+set -e
+if [ "$BUILDS_RESULT" -ne 0 ]; then
+    log_fail "Failed to query App Store Connect builds with asc"
+    print_summary
+    exit 1
+fi
+LATEST_BUILD=$(echo "$BUILDS_JSON" | jq -r '[.data[].attributes.version | tonumber] | max // 0' 2>/dev/null || echo "0")
 LATEST_BUILD=${LATEST_BUILD:-0}
 BUILD_NUMBER=$((LATEST_BUILD + 1))
 log_ok "Build number: $BUILD_NUMBER (previous: $LATEST_BUILD)"
@@ -508,9 +680,6 @@ fi
 
 # ─── Step 5: Archive iOS ─────────────────────────────────────────────────────
 
-EXPORT_PLIST="$WORK_DIR/ExportOptions.plist"
-generate_export_plist "$EXPORT_PLIST"
-
 if [ "$DO_IOS" = true ]; then
     step_timer_start
     log_step "Step 5/6: Archive + upload iOS"
@@ -535,12 +704,43 @@ if [ "$DO_IOS" = true ]; then
         exit 3
     fi
 
-    log_info "Uploading to App Store Connect..."
-    if run_xcodebuild "iOS upload" \
+    IOS_EXPORT_DIR="$WORK_DIR/ios-export"
+    IOS_EXPORT_PLIST="$WORK_DIR/ios-ExportOptions.plist"
+
+    if ensure_profiles_for_archive "$IOS_ARCHIVE"; then
+        generate_export_plist "$IOS_EXPORT_PLIST" "$IOS_ARCHIVE"
+    else
+        record_step "Archive + upload iOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Exporting IPA..."
+    if run_xcodebuild "iOS export" \
         -exportArchive \
         -archivePath "$IOS_ARCHIVE" \
-        -exportPath "$WORK_DIR/ios-export" \
-        -exportOptionsPlist "$EXPORT_PLIST"; then
+        -exportPath "$IOS_EXPORT_DIR" \
+        -exportOptionsPlist "$IOS_EXPORT_PLIST"; then
+        IOS_IPA=$(find "$IOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
+        if [ -z "$IOS_IPA" ]; then
+            log_fail "iOS export did not produce an IPA"
+            record_step "Archive + upload iOS" "FAIL"
+            print_summary
+            exit 3
+        fi
+        log_ok "iOS IPA exported: $(basename "$IOS_IPA")"
+    else
+        log_fail "iOS export failed"
+        record_step "Archive + upload iOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Uploading IPA to App Store Connect with asc..."
+    if run_asc "iOS upload" builds upload \
+        --app "$APP_ID" \
+        --ipa "$IOS_IPA" \
+        --platform IOS; then
         log_ok "iOS build uploaded to App Store Connect"
         record_step "Archive + upload iOS" "PASS"
     else
@@ -579,12 +779,43 @@ if [ "$DO_VISIONOS" = true ]; then
         exit 3
     fi
 
-    log_info "Uploading to App Store Connect..."
-    if run_xcodebuild "visionOS upload" \
+    VISIONOS_EXPORT_DIR="$WORK_DIR/visionos-export"
+    VISIONOS_EXPORT_PLIST="$WORK_DIR/visionos-ExportOptions.plist"
+
+    if ensure_profiles_for_archive "$VISIONOS_ARCHIVE"; then
+        generate_export_plist "$VISIONOS_EXPORT_PLIST" "$VISIONOS_ARCHIVE"
+    else
+        record_step "Archive + upload visionOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Exporting IPA..."
+    if run_xcodebuild "visionOS export" \
         -exportArchive \
         -archivePath "$VISIONOS_ARCHIVE" \
-        -exportPath "$WORK_DIR/visionos-export" \
-        -exportOptionsPlist "$EXPORT_PLIST"; then
+        -exportPath "$VISIONOS_EXPORT_DIR" \
+        -exportOptionsPlist "$VISIONOS_EXPORT_PLIST"; then
+        VISIONOS_IPA=$(find "$VISIONOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
+        if [ -z "$VISIONOS_IPA" ]; then
+            log_fail "visionOS export did not produce an IPA"
+            record_step "Archive + upload visionOS" "FAIL"
+            print_summary
+            exit 3
+        fi
+        log_ok "visionOS IPA exported: $(basename "$VISIONOS_IPA")"
+    else
+        log_fail "visionOS export failed"
+        record_step "Archive + upload visionOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Uploading IPA to App Store Connect with asc..."
+    if run_asc "visionOS upload" builds upload \
+        --app "$APP_ID" \
+        --ipa "$VISIONOS_IPA" \
+        --platform VISION_OS; then
         log_ok "visionOS build uploaded to App Store Connect"
         record_step "Archive + upload visionOS" "PASS"
     else
