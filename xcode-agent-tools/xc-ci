@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # xc-ci - Local CI pipeline replicating Xcode Cloud
-# Pipeline: Test iOS → Build-check visionOS → Archive+upload iOS → Archive+upload visionOS
+# Pipeline: Test iOS → Build-check visionOS → Archive+upload iOS → Archive+upload visionOS → Archive+upload Mac Catalyst
 
 set -e
 
@@ -15,6 +15,9 @@ IOS_ONLY=false
 VISIONOS_ONLY=false
 KEEP_WORKSPACE=false
 VERBOSE=false
+NO_UPLOAD=false
+CATALYST=false
+CATALYST_ONLY=false
 APP_ID=""
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -49,6 +52,7 @@ Pipeline:
   4. Build-check visionOS (compilation validation)
   5. Archive + upload iOS to App Store Connect
   6. Archive + upload visionOS to App Store Connect
+  7. Archive + upload Mac Catalyst to App Store Connect
 
 Builds are uploaded directly to ASC. Internal TestFlight testers
 receive them automatically. Both platforms share a single build
@@ -66,6 +70,9 @@ Options:
   --skip-tests         Skip the iOS test phase
   --ios-only           Only test + archive for iOS (skip visionOS)
   --visionos-only      Only build-check + archive for visionOS (skip iOS)
+  --catalyst           Also archive Mac Catalyst (macOS) build
+  --catalyst-only      Only archive + upload Mac Catalyst
+  --no-upload          Archive but don't upload to App Store Connect
   --keep-workspace     Don't clean up temp directory on exit
   --verbose            Show full xcodebuild output
   -h, --help           Show this help message
@@ -79,6 +86,9 @@ Examples:
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --keep-workspace
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --catalyst
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --catalyst-only
+  xc-ci --repo git@github.com:user/App.git --no-upload --keep-workspace
 
 EOF
 }
@@ -453,6 +463,12 @@ while [[ $# -gt 0 ]]; do
             IOS_ONLY=true; shift ;;
         --visionos-only)
             VISIONOS_ONLY=true; shift ;;
+        --catalyst)
+            CATALYST=true; shift ;;
+        --catalyst-only)
+            CATALYST=true; CATALYST_ONLY=true; shift ;;
+        --no-upload)
+            NO_UPLOAD=true; shift ;;
         --keep-workspace)
             KEEP_WORKSPACE=true; shift ;;
         --verbose)
@@ -472,8 +488,8 @@ if [ -z "$REPO_URL" ]; then
     exit 1
 fi
 
-if [ -z "$APP_ID" ]; then
-    echo -e "${RED}Error: --app-id is required${NC}"
+if [ -z "$APP_ID" ] && [ "$NO_UPLOAD" = false ]; then
+    echo -e "${RED}Error: --app-id is required (unless --no-upload is set)${NC}"
     echo ""
     show_help
     exit 1
@@ -490,12 +506,16 @@ trap cleanup EXIT
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
 
-log_info "Verifying App Store Connect authentication with asc..."
-if run_asc "asc auth doctor" auth doctor; then
-    log_ok "asc authentication verified"
+if [ "$NO_UPLOAD" = false ]; then
+    log_info "Verifying App Store Connect authentication with asc..."
+    if run_asc "asc auth doctor" auth doctor; then
+        log_ok "asc authentication verified"
+    else
+        log_fail "asc authentication failed"
+        exit 1
+    fi
 else
-    log_fail "asc authentication failed"
-    exit 1
+    log_info "Skipping App Store Connect authentication check (--no-upload)"
 fi
 
 if ensure_distribution_identity; then
@@ -562,20 +582,25 @@ fi
 
 # ─── Compute shared build number ─────────────────────────────────────────────
 
-log_info "Querying App Store Connect for latest build number..."
-set +e
-BUILDS_JSON=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null)
-BUILDS_RESULT=$?
-set -e
-if [ "$BUILDS_RESULT" -ne 0 ]; then
-    log_fail "Failed to query App Store Connect builds with asc"
-    print_summary
-    exit 1
+if [ "$NO_UPLOAD" = false ]; then
+    log_info "Querying App Store Connect for latest build number..."
+    set +e
+    BUILDS_JSON=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null)
+    BUILDS_RESULT=$?
+    set -e
+    if [ "$BUILDS_RESULT" -ne 0 ]; then
+        log_fail "Failed to query App Store Connect builds with asc"
+        print_summary
+        exit 1
+    fi
+    LATEST_BUILD=$(echo "$BUILDS_JSON" | jq -r '[.data[].attributes.version | tonumber] | max // 0' 2>/dev/null || echo "0")
+    LATEST_BUILD=${LATEST_BUILD:-0}
+    BUILD_NUMBER=$((LATEST_BUILD + 1))
+    log_ok "Build number: $BUILD_NUMBER (previous: $LATEST_BUILD)"
+else
+    BUILD_NUMBER=0
+    log_info "Skipping build number query (--no-upload)"
 fi
-LATEST_BUILD=$(echo "$BUILDS_JSON" | jq -r '[.data[].attributes.version | tonumber] | max // 0' 2>/dev/null || echo "0")
-LATEST_BUILD=${LATEST_BUILD:-0}
-BUILD_NUMBER=$((LATEST_BUILD + 1))
-log_ok "Build number: $BUILD_NUMBER (previous: $LATEST_BUILD)"
 
 # ─── Step 3: Test iOS ────────────────────────────────────────────────────────
 
@@ -583,6 +608,10 @@ DO_IOS=true
 DO_VISIONOS=true
 if [ "$IOS_ONLY" = true ]; then DO_VISIONOS=false; fi
 if [ "$VISIONOS_ONLY" = true ]; then DO_IOS=false; fi
+if [ "$CATALYST_ONLY" = true ]; then
+    DO_IOS=false
+    DO_VISIONOS=false
+fi
 
 if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     step_timer_start
@@ -686,6 +715,7 @@ if [ "$DO_IOS" = true ]; then
         "${PROJECT_ARG_ARRAY[@]}" \
         -scheme "$SCHEME" \
         -destination "generic/platform=iOS" \
+        -allowProvisioningUpdates \
         -derivedDataPath "$DERIVED_DATA" \
         -archivePath "$IOS_ARCHIVE" \
         -configuration Release \
@@ -699,49 +729,54 @@ if [ "$DO_IOS" = true ]; then
         exit 3
     fi
 
-    IOS_EXPORT_DIR="$WORK_DIR/ios-export"
-    IOS_EXPORT_PLIST="$WORK_DIR/ios-ExportOptions.plist"
+    if [ "$NO_UPLOAD" = false ]; then
+        IOS_EXPORT_DIR="$WORK_DIR/ios-export"
+        IOS_EXPORT_PLIST="$WORK_DIR/ios-ExportOptions.plist"
 
-    if ensure_profiles_for_archive "$IOS_ARCHIVE"; then
-        generate_export_plist "$IOS_EXPORT_PLIST" "$IOS_ARCHIVE"
-    else
-        record_step "Archive + upload iOS" "FAIL"
-        print_summary
-        exit 3
-    fi
-
-    log_info "Exporting IPA..."
-    if run_xcodebuild "iOS export" \
-        -exportArchive \
-        -archivePath "$IOS_ARCHIVE" \
-        -exportPath "$IOS_EXPORT_DIR" \
-        -exportOptionsPlist "$IOS_EXPORT_PLIST"; then
-        IOS_IPA=$(find "$IOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
-        if [ -z "$IOS_IPA" ]; then
-            log_fail "iOS export did not produce an IPA"
+        if ensure_profiles_for_archive "$IOS_ARCHIVE"; then
+            generate_export_plist "$IOS_EXPORT_PLIST" "$IOS_ARCHIVE"
+        else
             record_step "Archive + upload iOS" "FAIL"
             print_summary
             exit 3
         fi
-        log_ok "iOS IPA exported: $(basename "$IOS_IPA")"
-    else
-        log_fail "iOS export failed"
-        record_step "Archive + upload iOS" "FAIL"
-        print_summary
-        exit 3
-    fi
 
-    log_info "Uploading IPA to App Store Connect with asc..."
-    if run_asc "iOS upload" builds upload \
-        --app "$APP_ID" \
-        --ipa "$IOS_IPA"; then
-        log_ok "iOS build uploaded to App Store Connect"
-        record_step "Archive + upload iOS" "PASS"
+        log_info "Exporting IPA..."
+        if run_xcodebuild "iOS export" \
+            -exportArchive \
+            -archivePath "$IOS_ARCHIVE" \
+            -exportPath "$IOS_EXPORT_DIR" \
+            -exportOptionsPlist "$IOS_EXPORT_PLIST"; then
+            IOS_IPA=$(find "$IOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
+            if [ -z "$IOS_IPA" ]; then
+                log_fail "iOS export did not produce an IPA"
+                record_step "Archive + upload iOS" "FAIL"
+                print_summary
+                exit 3
+            fi
+            log_ok "iOS IPA exported: $(basename "$IOS_IPA")"
+        else
+            log_fail "iOS export failed"
+            record_step "Archive + upload iOS" "FAIL"
+            print_summary
+            exit 3
+        fi
+
+        log_info "Uploading IPA to App Store Connect with asc..."
+        if run_asc "iOS upload" builds upload \
+            --app "$APP_ID" \
+            --ipa "$IOS_IPA"; then
+            log_ok "iOS build uploaded to App Store Connect"
+            record_step "Archive + upload iOS" "PASS"
+        else
+            log_fail "iOS upload failed"
+            record_step "Archive + upload iOS" "FAIL"
+            print_summary
+            exit 3
+        fi
     else
-        log_fail "iOS upload failed"
-        record_step "Archive + upload iOS" "FAIL"
-        print_summary
-        exit 3
+        log_ok "iOS archive created (upload skipped — --no-upload)"
+        record_step "Archive iOS (no upload)" "PASS"
     fi
 else
     record_step "Archive + upload iOS" "SKIP"
@@ -760,6 +795,7 @@ if [ "$DO_VISIONOS" = true ]; then
         "${PROJECT_ARG_ARRAY[@]}" \
         -scheme "$SCHEME" \
         -destination "generic/platform=visionOS" \
+        -allowProvisioningUpdates \
         -derivedDataPath "$DERIVED_DATA" \
         -archivePath "$VISIONOS_ARCHIVE" \
         -configuration Release \
@@ -773,52 +809,137 @@ if [ "$DO_VISIONOS" = true ]; then
         exit 3
     fi
 
-    VISIONOS_EXPORT_DIR="$WORK_DIR/visionos-export"
-    VISIONOS_EXPORT_PLIST="$WORK_DIR/visionos-ExportOptions.plist"
+    if [ "$NO_UPLOAD" = false ]; then
+        VISIONOS_EXPORT_DIR="$WORK_DIR/visionos-export"
+        VISIONOS_EXPORT_PLIST="$WORK_DIR/visionos-ExportOptions.plist"
 
-    if ensure_profiles_for_archive "$VISIONOS_ARCHIVE"; then
-        generate_export_plist "$VISIONOS_EXPORT_PLIST" "$VISIONOS_ARCHIVE"
-    else
-        record_step "Archive + upload visionOS" "FAIL"
-        print_summary
-        exit 3
-    fi
-
-    log_info "Exporting IPA..."
-    if run_xcodebuild "visionOS export" \
-        -exportArchive \
-        -archivePath "$VISIONOS_ARCHIVE" \
-        -exportPath "$VISIONOS_EXPORT_DIR" \
-        -exportOptionsPlist "$VISIONOS_EXPORT_PLIST"; then
-        VISIONOS_IPA=$(find "$VISIONOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
-        if [ -z "$VISIONOS_IPA" ]; then
-            log_fail "visionOS export did not produce an IPA"
+        if ensure_profiles_for_archive "$VISIONOS_ARCHIVE"; then
+            generate_export_plist "$VISIONOS_EXPORT_PLIST" "$VISIONOS_ARCHIVE"
+        else
             record_step "Archive + upload visionOS" "FAIL"
             print_summary
             exit 3
         fi
-        log_ok "visionOS IPA exported: $(basename "$VISIONOS_IPA")"
+
+        log_info "Exporting IPA..."
+        if run_xcodebuild "visionOS export" \
+            -exportArchive \
+            -archivePath "$VISIONOS_ARCHIVE" \
+            -exportPath "$VISIONOS_EXPORT_DIR" \
+            -exportOptionsPlist "$VISIONOS_EXPORT_PLIST"; then
+            VISIONOS_IPA=$(find "$VISIONOS_EXPORT_DIR" -maxdepth 1 -name '*.ipa' -print -quit)
+            if [ -z "$VISIONOS_IPA" ]; then
+                log_fail "visionOS export did not produce an IPA"
+                record_step "Archive + upload visionOS" "FAIL"
+                print_summary
+                exit 3
+            fi
+            log_ok "visionOS IPA exported: $(basename "$VISIONOS_IPA")"
+        else
+            log_fail "visionOS export failed"
+            record_step "Archive + upload visionOS" "FAIL"
+            print_summary
+            exit 3
+        fi
+
+        log_info "Uploading IPA to App Store Connect with asc..."
+        if run_asc "visionOS upload" builds upload \
+            --app "$APP_ID" \
+            --ipa "$VISIONOS_IPA"; then
+            log_ok "visionOS build uploaded to App Store Connect"
+            record_step "Archive + upload visionOS" "PASS"
+        else
+            log_fail "visionOS upload failed"
+            record_step "Archive + upload visionOS" "FAIL"
+            print_summary
+            exit 3
+        fi
     else
-        log_fail "visionOS export failed"
-        record_step "Archive + upload visionOS" "FAIL"
+        log_ok "visionOS archive created (upload skipped — --no-upload)"
+        record_step "Archive visionOS (no upload)" "PASS"
+    fi
+else
+    record_step "Archive + upload visionOS" "SKIP"
+fi
+
+# ─── Step 7: Archive Mac Catalyst ─────────────────────────────────────────────
+
+if [ "$CATALYST" = true ]; then
+    step_timer_start
+    log_step "Step 7: Archive + upload Mac Catalyst"
+
+    CATALYST_ARCHIVE="$WORK_DIR/catalyst.xcarchive"
+
+    log_info "Archiving Mac Catalyst (build $BUILD_NUMBER)..."
+    if run_xcodebuild "Mac Catalyst archive" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "generic/platform=macOS,variant=Mac Catalyst" \
+        -allowProvisioningUpdates \
+        -derivedDataPath "$DERIVED_DATA" \
+        -archivePath "$CATALYST_ARCHIVE" \
+        -configuration Release \
+        CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+        archive; then
+        log_ok "Mac Catalyst archive created"
+    else
+        log_fail "Mac Catalyst archive failed"
+        record_step "Archive + upload Mac Catalyst" "FAIL"
         print_summary
         exit 3
     fi
 
-    log_info "Uploading IPA to App Store Connect with asc..."
-    if run_asc "visionOS upload" builds upload \
-        --app "$APP_ID" \
-        --ipa "$VISIONOS_IPA"; then
-        log_ok "visionOS build uploaded to App Store Connect"
-        record_step "Archive + upload visionOS" "PASS"
+    if [ "$NO_UPLOAD" = false ]; then
+        CATALYST_EXPORT_DIR="$WORK_DIR/catalyst-export"
+        CATALYST_EXPORT_PLIST="$WORK_DIR/catalyst-ExportOptions.plist"
+
+        if ensure_profiles_for_archive "$CATALYST_ARCHIVE"; then
+            generate_export_plist "$CATALYST_EXPORT_PLIST" "$CATALYST_ARCHIVE"
+        else
+            record_step "Archive + upload Mac Catalyst" "FAIL"
+            print_summary
+            exit 3
+        fi
+
+        log_info "Exporting PKG..."
+        if run_xcodebuild "Mac Catalyst export" \
+            -exportArchive \
+            -archivePath "$CATALYST_ARCHIVE" \
+            -exportPath "$CATALYST_EXPORT_DIR" \
+            -exportOptionsPlist "$CATALYST_EXPORT_PLIST"; then
+            CATALYST_PKG=$(find "$CATALYST_EXPORT_DIR" -maxdepth 1 -name '*.pkg' -print -quit)
+            if [ -z "$CATALYST_PKG" ]; then
+                log_fail "Mac Catalyst export did not produce a PKG"
+                record_step "Archive + upload Mac Catalyst" "FAIL"
+                print_summary
+                exit 3
+            fi
+            log_ok "Mac Catalyst PKG exported: $(basename "$CATALYST_PKG")"
+        else
+            log_fail "Mac Catalyst export failed"
+            record_step "Archive + upload Mac Catalyst" "FAIL"
+            print_summary
+            exit 3
+        fi
+
+        log_info "Uploading PKG to App Store Connect with asc..."
+        if run_asc "Mac Catalyst upload" builds upload \
+            --app "$APP_ID" \
+            --pkg "$CATALYST_PKG"; then
+            log_ok "Mac Catalyst build uploaded to App Store Connect"
+            record_step "Archive + upload Mac Catalyst" "PASS"
+        else
+            log_fail "Mac Catalyst upload failed"
+            record_step "Archive + upload Mac Catalyst" "FAIL"
+            print_summary
+            exit 3
+        fi
     else
-        log_fail "visionOS upload failed"
-        record_step "Archive + upload visionOS" "FAIL"
-        print_summary
-        exit 3
+        log_ok "Mac Catalyst archive created (upload skipped — --no-upload)"
+        record_step "Archive Mac Catalyst (no upload)" "PASS"
     fi
 else
-    record_step "Archive + upload visionOS" "SKIP"
+    record_step "Archive + upload Mac Catalyst" "SKIP"
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
