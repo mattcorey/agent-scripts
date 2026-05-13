@@ -734,7 +734,10 @@ if [ "$DO_IOS" = true ]; then
     log_info "Uploading IPA to App Store Connect with asc..."
     if run_asc "iOS upload" builds upload \
         --app "$APP_ID" \
-        --ipa "$IOS_IPA"; then
+        --platform IOS \
+        --ipa "$IOS_IPA" \
+        --wait \
+        --poll-interval 15s; then
         log_ok "iOS build uploaded to App Store Connect"
         record_step "Archive + upload iOS" "PASS"
     else
@@ -808,7 +811,10 @@ if [ "$DO_VISIONOS" = true ]; then
     log_info "Uploading IPA to App Store Connect with asc..."
     if run_asc "visionOS upload" builds upload \
         --app "$APP_ID" \
-        --ipa "$VISIONOS_IPA"; then
+        --platform VISION_OS \
+        --ipa "$VISIONOS_IPA" \
+        --wait \
+        --poll-interval 15s; then
         log_ok "visionOS build uploaded to App Store Connect"
         record_step "Archive + upload visionOS" "PASS"
     else
