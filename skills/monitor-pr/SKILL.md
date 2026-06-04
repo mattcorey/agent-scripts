@@ -25,8 +25,9 @@ Watch a PR and act on new actionable signals without disrupting unrelated work.
 Each poll:
 
 1. Read PR state: `gh pr view --json number,title,url,state,isDraft,reviewDecision,mergeStateStatus,comments,reviews,latestReviews,statusCheckRollup,headRefName`.
-2. Compare against already-seen activity. Ignore stale signals already handled.
-3. Pick one actionable item at a time.
+2. Read inline review comments separately with GitHub review threads or the pull request review-comments API; do not rely on `gh pr view` alone for line-level comments.
+3. Compare against already-seen activity. Ignore stale signals already handled.
+4. Pick one actionable item at a time.
 
 ## Handling Actionable Items
 
