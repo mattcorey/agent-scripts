@@ -33,7 +33,8 @@ Each poll:
 
 - Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the specific commenter if they differ from the original committer, otherwise address '@codex', summarize what changed, and request a full re-review.
 - Needs human input or unsafe to fix: comment with the blocker/question and stop or continue only if other independent items remain.
-- Merge-ready/no action: keep watching until the quiet window completes.
+- Positive review/no action: if the latest-head review signal is clearly approving or reports no major issues, including a thumbs-up reaction, treat monitoring as complete after confirming there is no newer actionable activity.
+- Merge-ready/no action without an explicit positive review signal: keep watching until the quiet window completes.
 
 ## Guardrails
 
