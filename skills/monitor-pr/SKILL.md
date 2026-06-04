@@ -12,7 +12,7 @@ Watch a PR and act on new actionable signals without disrupting unrelated work.
 
 - Use the PR URL/number from the prompt when provided.
 - Otherwise infer the PR from the current branch with `gh pr view`.
-- Record the PR number, branch, current HEAD, labels/check state, existing comments, reviews, and inline review-comment/thread IDs before watching.
+- Record the PR number, branch, current HEAD, original committer identity, labels/check state, existing comments, reviews, and inline review-comment/thread IDs before watching.
 
 ## Default Watch Policy
 
