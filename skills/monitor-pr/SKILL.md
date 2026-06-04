@@ -12,7 +12,7 @@ Watch a PR and act on new actionable signals without disrupting unrelated work.
 
 - Use the PR URL/number from the prompt when provided.
 - Otherwise infer the PR from the current branch with `gh pr view`.
-- Record the PR number, branch, current HEAD, and current labels/check state before watching.
+- Record the PR number, branch, current HEAD, labels/check state, existing comments, reviews, and inline review-comment/thread IDs before watching.
 
 ## Default Watch Policy
 
@@ -31,7 +31,7 @@ Each poll:
 
 ## Handling Actionable Items
 
-- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the reviewer as '@codex', summarize what changed, and request a full re-review.
+- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the specific commenter if they differ from the original committer, otherwise address '@codex', summarize what changed, and request a full re-review.
 - Needs human input or unsafe to fix: comment with the blocker/question and stop or continue only if other independent items remain.
 - Merge-ready/no action: keep watching until the quiet window completes.
 
