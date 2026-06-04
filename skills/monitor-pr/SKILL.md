@@ -1,6 +1,6 @@
 ---
 name: monitor-pr
-description: Watch an existing GitHub pull request for CI failures, review comments, requested changes, or merge readiness, and handle actionable items. Use when the user asks to monitor, watch, keep an eye on, start a timer for, or automatically handle a PR.
+description: Watch an existing GitHub pull request for review comments, requested changes, maintainer comments, or merge readiness, and handle actionable items. Use when the user asks to monitor, watch, keep an eye on, start a timer for, or automatically handle a PR.
 argument-hint: "PR URL/number and optional interval/quiet-window"
 ---
 
@@ -17,22 +17,20 @@ Watch a PR and act on new actionable signals without disrupting unrelated work.
 ## Default Watch Policy
 
 - Poll every 3 minutes unless the user specifies another interval.
-- Stop after at least 1 hour with no new actionable PR activity, unless the user specifies another quiet window.
-- Treat new failing CI, requested changes, review comments, and maintainer comments as actionable candidates.
+- Stop after at least 15 minutes with no new actionable PR activity, unless the user specifies another quiet window.
+- Treat requested changes, review comments, and maintainer comments as actionable candidates.
 
 ## Poll Loop
 
 Each poll:
 
 1. Read PR state: `gh pr view --json number,title,url,state,isDraft,reviewDecision,mergeStateStatus,comments,reviews,latestReviews,statusCheckRollup,headRefName`.
-2. Read checks: `gh pr checks` and, for failures, `gh run list` / `gh run view` as needed.
-3. Compare against already-seen activity. Ignore stale signals already handled.
-4. Pick one actionable item at a time.
+2. Compare against already-seen activity. Ignore stale signals already handled.
+3. Pick one actionable item at a time.
 
 ## Handling Actionable Items
 
-- CI failure: inspect logs, reproduce locally if feasible, implement a focused fix, verify, commit, push, and comment with what changed.
-- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, and reply/comment with what changed.
+- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the reviewer as '@codex', summarize what changed, and request a full re-review.
 - Needs human input or unsafe to fix: comment with the blocker/question and stop or continue only if other independent items remain.
 - Merge-ready/no action: keep watching until the quiet window completes.
 
