@@ -12,7 +12,7 @@ Watch a PR and act on new actionable signals without disrupting unrelated work.
 
 - Use the PR URL/number from the prompt when provided.
 - Otherwise infer the PR from the current branch with `gh pr view`.
-- Record the PR number, branch, current HEAD, original committer identity, including GitHub login/author association when available, labels/check state, existing comments, reviews, and inline review-comment/thread IDs before watching.
+- Record the PR number, branch, current HEAD, viewer login, original committer identity, including GitHub login/author association when available, labels/check state, existing comments, reviews, and inline review-comment/thread IDs before watching.
 
 ## Default Watch Policy
 
@@ -31,10 +31,17 @@ Each poll:
 
 ## Handling Actionable Items
 
-- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the specific commenter if they differ from the original committer, otherwise address '@codex', summarize what changed, and request a full re-review.
+- Review comment/requested changes: inspect the code and thread, implement if correct and safe, verify, commit, push, reply directly to the original review comment, address the responder using the rules below, summarize what changed, and request a full re-review.
 - Needs human input or unsafe to fix: comment with the blocker/question and stop or continue only if other independent items remain.
 - Positive review/no action: if the latest-head review signal is clearly approving or reports no major issues, including a thumbs-up reaction, treat monitoring as complete after confirming there is no newer actionable activity.
 - Merge-ready/no action without an explicit positive review signal: keep watching until the quiet window completes.
+
+## Response Addressing
+
+- Address `@codex` for any Codex-originated actionable item, regardless of the raw GitHub author login.
+- Treat an item as Codex-originated when GitHub reports it from the viewer/current user, the original committer/PR author, a Codex connector/bot login such as `chatgpt-codex-connector`, or when the body clearly identifies Codex through a Codex review header or `@codex` instructions.
+- Do not address raw Codex connector/bot handles directly; use `@codex` instead so the responder that can act on the thread is notified.
+- Otherwise address the specific commenter with their GitHub handle.
 
 ## Guardrails
 
