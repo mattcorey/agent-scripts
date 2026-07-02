@@ -188,7 +188,24 @@ validate_xcode_dir() {
     fi
 
     local normalized_xcode_dir="${XCODE_DIR%/}"
-    XCODE_DEVELOPER_DIR="$normalized_xcode_dir/Contents/Developer"
+    local absolute_xcode_dir
+    case "$normalized_xcode_dir" in
+        /*) absolute_xcode_dir="$normalized_xcode_dir" ;;
+        *)
+            local xcode_parent
+            local xcode_name
+            local absolute_parent
+            xcode_parent=$(dirname "$normalized_xcode_dir")
+            xcode_name=$(basename "$normalized_xcode_dir")
+            if ! absolute_parent=$(cd "$xcode_parent" 2>/dev/null && pwd -P); then
+                log_fail "Invalid --xcode-dir: parent directory does not exist: $xcode_parent"
+                return 1
+            fi
+            absolute_xcode_dir="$absolute_parent/$xcode_name"
+            ;;
+    esac
+
+    XCODE_DEVELOPER_DIR="$absolute_xcode_dir/Contents/Developer"
     local xcodebuild_path="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
 
     if [ ! -x "$xcodebuild_path" ]; then
