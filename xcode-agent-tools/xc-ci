@@ -16,6 +16,10 @@ VISIONOS_ONLY=false
 KEEP_WORKSPACE=false
 VERBOSE=false
 APP_ID=""
+XCODE_DIR=""
+XCODE_DIR_PROVIDED=false
+XCODE_DEVELOPER_DIR=""
+XCODE_VERSION_OUTPUT=""
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +67,7 @@ Required:
 Options:
   --branch <branch>    Branch to build [default: main]
   --scheme <scheme>    Xcode scheme [default: auto-detect]
+  --xcode-dir <path>   Xcode.app path to use without changing xcode-select
   --skip-tests         Skip the iOS test phase
   --ios-only           Only test + archive for iOS (skip visionOS)
   --visionos-only      Only build-check + archive for visionOS (skip iOS)
@@ -78,6 +83,7 @@ Examples:
   xc-ci --repo git@github.com:user/App.git --app-id 123456789
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
+  xc-ci --repo git@github.com:user/App.git --app-id 123456789 --xcode-dir /Applications/Xcode.app
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --keep-workspace
 
 EOF
@@ -163,6 +169,64 @@ cleanup() {
     fi
 }
 
+run_xcode_tool() {
+    if [ -n "$XCODE_DEVELOPER_DIR" ]; then
+        DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$@"
+    else
+        "$@"
+    fi
+}
+
+validate_xcode_dir() {
+    if [ "$XCODE_DIR_PROVIDED" = false ]; then
+        return 0
+    fi
+
+    if [ -z "$XCODE_DIR" ]; then
+        log_fail "--xcode-dir requires a non-empty Xcode.app path"
+        return 1
+    fi
+
+    local normalized_xcode_dir="${XCODE_DIR%/}"
+    XCODE_DEVELOPER_DIR="$normalized_xcode_dir/Contents/Developer"
+    local xcodebuild_path="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
+
+    if [ ! -x "$xcodebuild_path" ]; then
+        log_fail "Invalid --xcode-dir: expected executable xcodebuild at $xcodebuild_path"
+        return 1
+    fi
+
+    set +e
+    XCODE_VERSION_OUTPUT=$(DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$xcodebuild_path" -version 2>&1)
+    local result=$?
+    set -e
+
+    if [ $result -ne 0 ]; then
+        log_fail "Invalid --xcode-dir: xcodebuild -version failed for $XCODE_DEVELOPER_DIR"
+        echo "$XCODE_VERSION_OUTPUT" | head -10 | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo -e "  ${RED}✗${NC} $line"
+        done
+        return $result
+    fi
+
+    return 0
+}
+
+log_xcode_selection() {
+    if [ -z "$XCODE_DEVELOPER_DIR" ]; then
+        return 0
+    fi
+
+    local version_line
+    local build_line
+    version_line=$(echo "$XCODE_VERSION_OUTPUT" | sed -n '1p')
+    build_line=$(echo "$XCODE_VERSION_OUTPUT" | sed -n '2p')
+
+    log_info "Using Xcode: $version_line${build_line:+ ($build_line)}"
+    log_info "Developer dir: $XCODE_DEVELOPER_DIR"
+}
+
 run_xcodebuild() {
     local label="$1"
     shift
@@ -171,12 +235,12 @@ run_xcodebuild() {
 
     if [ "$VERBOSE" = true ]; then
         set +e
-        xcodebuild "$@" 2>&1 | tee "$temp_output"
+        run_xcode_tool xcodebuild "$@" 2>&1 | tee "$temp_output"
         local result=${PIPESTATUS[0]}
         set -e
     else
         set +e
-        xcodebuild "$@" > "$temp_output" 2>&1
+        run_xcode_tool xcodebuild "$@" > "$temp_output" 2>&1
         local result=$?
         set -e
     fi
@@ -272,7 +336,7 @@ detect_scheme() {
     # All log output goes to stderr so stdout is clean for the return value
     log_info "Detecting scheme..." >&2
     local list_output
-    list_output=$(xcodebuild "${PROJECT_ARG_ARRAY[@]}" -list 2>&1)
+    list_output=$(run_xcode_tool xcodebuild "${PROJECT_ARG_ARRAY[@]}" -list 2>&1)
 
     local all_schemes
     all_schemes=$(echo "$list_output" | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag && !/^[[:space:]]*$/{gsub(/^[[:space:]]+/, "", $0); print $0}')
@@ -443,6 +507,16 @@ while [[ $# -gt 0 ]]; do
             SCHEME="$2"; shift 2 ;;
         --scheme=*)
             SCHEME="${1#*=}"; shift ;;
+        --xcode-dir)
+            if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --xcode-dir requires a path${NC}"
+                exit 1
+            fi
+            XCODE_DIR_PROVIDED=true
+            XCODE_DIR="$2"; shift 2 ;;
+        --xcode-dir=*)
+            XCODE_DIR_PROVIDED=true
+            XCODE_DIR="${1#*=}"; shift ;;
         --app-id)
             APP_ID="$2"; shift 2 ;;
         --app-id=*)
@@ -484,11 +558,17 @@ if [ "$IOS_ONLY" = true ] && [ "$VISIONOS_ONLY" = true ]; then
     exit 1
 fi
 
+if ! validate_xcode_dir; then
+    exit 1
+fi
+
 # ─── Trap for cleanup ────────────────────────────────────────────────────────
 
 trap cleanup EXIT
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
+
+log_xcode_selection
 
 log_info "Verifying App Store Connect authentication with asc..."
 if run_asc "asc auth doctor" auth doctor; then
@@ -589,7 +669,7 @@ if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     log_step "Step 3/6: Test iOS"
 
     # Find the best available iPhone simulator: prefer Pro Max, then Pro, then any
-    IOS_SIM_ID=$(xcrun simctl list devices available -j \
+    IOS_SIM_ID=$(run_xcode_tool xcrun simctl list devices available -j \
         | jq -r '
             [.devices[][] | select(.name | test("^iPhone")) | select(.isAvailable == true)]
             | (map(select(.name | test("Pro Max"))) | first)
@@ -603,7 +683,7 @@ if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
         print_summary
         exit 1
     fi
-    IOS_SIM_NAME=$(xcrun simctl list devices available -j \
+    IOS_SIM_NAME=$(run_xcode_tool xcrun simctl list devices available -j \
         | jq -r --arg id "$IOS_SIM_ID" '.devices[][] | select(.udid == $id) | .name' 2>/dev/null)
     log_info "Using simulator: $IOS_SIM_NAME ($IOS_SIM_ID)"
 
@@ -620,7 +700,7 @@ if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
 
         # Parse test results
         if [ -d "$RESULT_BUNDLE" ]; then
-            TEST_JSON=$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json 2>/dev/null || echo "{}")
+            TEST_JSON=$(run_xcode_tool xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json 2>/dev/null || echo "{}")
             if command -v jq >/dev/null 2>&1; then
                 PASSED=$(echo "$TEST_JSON" | jq -r '[.devicesAndConfigurations[]?.passedTests // 0] | add' 2>/dev/null || echo "0")
                 FAILED=$(echo "$TEST_JSON" | jq -r '[.devicesAndConfigurations[]?.failedTests // 0] | add' 2>/dev/null || echo "0")
