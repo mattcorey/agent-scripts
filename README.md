@@ -132,6 +132,7 @@ Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp w
 **Options:**
 - `--branch <branch>` - Branch to build [default: main]
 - `--scheme <scheme>` - Xcode scheme [default: auto-detect]
+- `--xcode-dir <path>` - Xcode.app path to use without changing `xcode-select`
 - `--skip-tests` - Skip the iOS test phase
 - `--ios-only` - Only test + archive for iOS (skip visionOS)
 - `--visionos-only` - Only build-check + archive for visionOS (skip iOS)
@@ -147,6 +148,7 @@ Archive export requires a local distribution signing identity and App Store prov
 xc-ci --repo git@github.com:user/App.git --app-id 123456789
 xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
 xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
+xc-ci --repo git@github.com:user/App.git --app-id 123456789 --xcode-dir /Applications/Xcode.app
 ```
 
 ## Requirements
