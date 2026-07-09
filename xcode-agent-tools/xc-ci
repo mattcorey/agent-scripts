@@ -685,24 +685,35 @@ if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     step_timer_start
     log_step "Step 3/6: Test iOS"
 
-    # Find the best available iPhone simulator: prefer Pro Max, then Pro, then any
+    # Keep the simulator runtime aligned with the selected Xcode SDK. Newer beta
+    # runtimes may be visible to stable Xcode but are not a valid CI pairing.
+    IOS_SDK_VERSION=$(run_xcode_tool xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)
+    if [ -z "$IOS_SDK_VERSION" ]; then
+        log_fail "Could not determine the selected Xcode iOS Simulator SDK version"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+    IOS_RUNTIME_ID="com.apple.CoreSimulator.SimRuntime.iOS-${IOS_SDK_VERSION//./-}"
+
+    # Find the best available iPhone on that runtime: prefer Pro Max, then Pro, then any.
     IOS_SIM_ID=$(run_xcode_tool xcrun simctl list devices available -j \
-        | jq -r '
-            [.devices[][] | select(.name | test("^iPhone")) | select(.isAvailable == true)]
+        | jq -r --arg runtime "$IOS_RUNTIME_ID" '
+            [.devices[$runtime][]? | select(.name | test("^iPhone")) | select(.isAvailable == true)]
             | (map(select(.name | test("Pro Max"))) | first)
               // (map(select(.name | test("Pro"))) | first)
               // first
             | .udid
         ' 2>/dev/null)
     if [ -z "$IOS_SIM_ID" ] || [ "$IOS_SIM_ID" = "null" ]; then
-        log_fail "No available iPhone simulator found"
+        log_fail "No available iPhone simulator found for iOS $IOS_SDK_VERSION"
         record_step "Test iOS" "FAIL"
         print_summary
         exit 1
     fi
     IOS_SIM_NAME=$(run_xcode_tool xcrun simctl list devices available -j \
         | jq -r --arg id "$IOS_SIM_ID" '.devices[][] | select(.udid == $id) | .name' 2>/dev/null)
-    log_info "Using simulator: $IOS_SIM_NAME ($IOS_SIM_ID)"
+    log_info "Using simulator: $IOS_SIM_NAME, iOS $IOS_SDK_VERSION ($IOS_SIM_ID)"
 
     RESULT_BUNDLE="$WORK_DIR/test_results.xcresult"
 
