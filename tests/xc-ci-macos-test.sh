@@ -66,6 +66,8 @@ fi
 EXPORT_PLIST=$(find "$TEST_TMP/workspaces" -name macos-ExportOptions.plist -print -quit)
 [ -n "$EXPORT_PLIST" ] || fail "macOS ExportOptions.plist was not created"
 assert_contains "$EXPORT_PLIST" "<string>app-store-connect</string>"
+assert_contains "$EXPORT_PLIST" "<key>manageAppVersionAndBuildNumber</key>"
+assert_contains "$EXPORT_PLIST" "<false/>"
 assert_contains "$EXPORT_PLIST" "<string>ABCDE12345</string>"
 
 FAILURE_OUTPUT="$TEST_TMP/failure.txt"

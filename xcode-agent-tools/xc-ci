@@ -533,6 +533,8 @@ generate_macos_export_plist() {
 <dict>
     <key>method</key>
     <string>app-store-connect</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
     <key>teamID</key>
     <string>$(xml_escape "$TEAM_ID")</string>
 </dict>
