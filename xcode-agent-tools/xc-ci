@@ -774,7 +774,8 @@ if [ "$DO_MACOS" = true ]; then
     NEXT_BUILD_OUTPUT=$(asc builds next-build-number \
         --app "$APP_ID" \
         --version "$MARKETING_VERSION" \
-        --platform MAC_OS 2>&1)
+        --platform MAC_OS \
+        --output json 2>&1)
     NEXT_BUILD_RESULT=$?
     set -e
     if [ "$NEXT_BUILD_RESULT" -ne 0 ]; then
