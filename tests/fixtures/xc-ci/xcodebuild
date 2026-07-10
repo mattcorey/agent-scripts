@@ -1,0 +1,48 @@
+#!/bin/bash
+
+set -e
+
+echo "DEVELOPER_DIR=${DEVELOPER_DIR:-} | $*" >> "$XCODEBUILD_COMMAND_LOG"
+
+if [ "$1" = "-version" ]; then
+    echo "Xcode 99.0"
+    echo "Build version TEST"
+    exit 0
+fi
+
+case " $* " in
+    *" -showBuildSettings "*)
+        echo '[{"target":"ExampleMacApp","buildSettings":{"PRODUCT_TYPE":"com.apple.product-type.application","MARKETING_VERSION":"1.4.0","PRODUCT_BUNDLE_IDENTIFIER":"com.example.macapp"}}]'
+        exit 0
+        ;;
+esac
+
+archive_path=""
+export_path=""
+previous=""
+for argument in "$@"; do
+    if [ "$previous" = "-archivePath" ]; then
+        archive_path="$argument"
+    elif [ "$previous" = "-exportPath" ]; then
+        export_path="$argument"
+    fi
+    previous="$argument"
+done
+
+case " $* " in
+    *" clean archive "*)
+        app_path="$archive_path/Products/Applications/ExampleMacApp.app/Contents"
+        mkdir -p "$app_path"
+        plutil -create xml1 "$app_path/Info.plist"
+        plutil -insert CFBundleIdentifier -string "com.example.macapp" "$app_path/Info.plist"
+        plutil -insert LSApplicationCategoryType -string "public.app-category.productivity" "$app_path/Info.plist"
+        ;;
+    *" -exportArchive "*)
+        if [ "${XC_CI_FAIL_EXPORT:-false}" = true ]; then
+            echo "error: fixture export failure" >&2
+            exit 65
+        fi
+        mkdir -p "$export_path/nested"
+        touch "$export_path/nested/ExampleMacApp.pkg"
+        ;;
+esac
