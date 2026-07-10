@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -e
+
+if [ "$1" = "clone" ]; then
+    destination="${!#}"
+    mkdir -p "$destination/ExampleMacApp.xcodeproj"
+    touch "$destination/ExampleMacApp.xcodeproj/project.pbxproj"
+elif [ "$1" = "log" ]; then
+    echo "abc1234 Test fixture"
+else
+    echo "Unexpected git command: $*" >&2
+    exit 1
+fi

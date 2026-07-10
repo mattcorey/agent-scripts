@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ "$1" = "find-identity" ]; then
+    echo '  1) ABCDEF "Apple Distribution: Example Organization (ABCDE12345)"'
+    exit 0
+fi
+
+echo "Unexpected security command: $*" >&2
+exit 1

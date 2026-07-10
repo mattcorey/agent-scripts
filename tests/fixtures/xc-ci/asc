@@ -1,0 +1,21 @@
+#!/bin/bash
+
+set -e
+
+echo "$*" >> "$ASC_COMMAND_LOG"
+
+if [ "$1 $2" = "auth doctor" ]; then
+    exit 0
+fi
+
+if [ "$1 $2" = "builds next-build-number" ]; then
+    echo '{"nextBuildNumber":42}'
+    exit 0
+fi
+
+if [ "$1 $2" = "builds upload" ]; then
+    exit 0
+fi
+
+echo "Unexpected asc command: $*" >&2
+exit 1

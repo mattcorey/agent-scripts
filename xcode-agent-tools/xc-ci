@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # xc-ci - Local CI pipeline replicating Xcode Cloud
-# Pipeline: Test iOS → Build-check visionOS → Archive+upload iOS → Archive+upload visionOS
+# Pipeline: Test → Build-check → Archive+upload for the selected Apple platforms
 
 set -e
 
@@ -13,9 +13,11 @@ SCHEME=""
 SKIP_TESTS=false
 IOS_ONLY=false
 VISIONOS_ONLY=false
+MACOS_ONLY=false
 KEEP_WORKSPACE=false
 VERBOSE=false
 APP_ID=""
+TEAM_ID=""
 XCODE_DIR=""
 XCODE_DIR_PROVIDED=false
 XCODE_DEVELOPER_DIR=""
@@ -41,7 +43,7 @@ PIPELINE_START=$SECONDS
 
 show_help() {
     cat << 'EOF'
-xc-ci - Local CI pipeline replicating Xcode Cloud
+xc-ci - Local iOS, visionOS, and macOS App Store/TestFlight pipeline
 
 Clones a repo into an isolated temp workspace and runs a full CI pipeline:
 test, build-check, archive, and upload to App Store Connect.
@@ -53,10 +55,11 @@ Pipeline:
   4. Build-check visionOS (compilation validation)
   5. Archive + upload iOS to App Store Connect
   6. Archive + upload visionOS to App Store Connect
+  7. With --macos-only: test, archive, export a PKG, and upload macOS
 
-Builds are uploaded directly to ASC. Internal TestFlight testers
-receive them automatically. Both platforms share a single build
-number queried from ASC.
+Builds are uploaded directly to ASC for App Store Connect/TestFlight.
+iOS and visionOS share a build number; macOS uses the next build number
+for the selected scheme's MARKETING_VERSION and MAC_OS platform.
 
 Usage: xc-ci --repo <url> --app-id <id> [OPTIONS]
 
@@ -68,9 +71,11 @@ Options:
   --branch <branch>    Branch to build [default: main]
   --scheme <scheme>    Xcode scheme [default: auto-detect]
   --xcode-dir <path>   Xcode.app path to use without changing xcode-select
-  --skip-tests         Skip the iOS test phase
+  --team-id <id>       Development team ID (required with --macos-only)
+  --skip-tests         Skip the platform test phase
   --ios-only           Only test + archive for iOS (skip visionOS)
   --visionos-only      Only build-check + archive for visionOS (skip iOS)
+  --macos-only         Test, archive, export, and upload macOS only
   --keep-workspace     Don't clean up temp directory on exit
   --verbose            Show full xcodebuild output
   -h, --help           Show this help message
@@ -84,6 +89,7 @@ Examples:
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --xcode-dir /Applications/Xcode.app
+  xc-ci --repo git@github.com:user/MacApp.git --app-id 123456789 --scheme MacApp --team-id ABC1234567 --macos-only
   xc-ci --repo git@github.com:user/App.git --app-id 123456789 --keep-workspace
 
 EOF
@@ -159,8 +165,11 @@ print_summary() {
 }
 
 cleanup() {
+    local exit_status=$?
     if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
-        if [ "$KEEP_WORKSPACE" = true ]; then
+        if [ "$exit_status" -ne 0 ]; then
+            log_warn "Pipeline failed; preserving workspace: $WORK_DIR"
+        elif [ "$KEEP_WORKSPACE" = true ]; then
             log_warn "Keeping workspace: $WORK_DIR"
         else
             log_info "Cleaning up workspace..."
@@ -171,7 +180,13 @@ cleanup() {
 
 run_xcode_tool() {
     if [ -n "$XCODE_DEVELOPER_DIR" ]; then
-        DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$@"
+        local tool="$1"
+        shift
+        if [ -x "$XCODE_DEVELOPER_DIR/usr/bin/$tool" ]; then
+            DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$XCODE_DEVELOPER_DIR/usr/bin/$tool" "$@"
+        else
+            DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$tool" "$@"
+        fi
     else
         "$@"
     fi
@@ -508,6 +523,25 @@ PLIST
     } > "$plist_path"
 }
 
+generate_macos_export_plist() {
+    local plist_path="$1"
+
+    cat > "$plist_path" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+    <key>teamID</key>
+    <string>$(xml_escape "$TEAM_ID")</string>
+</dict>
+</plist>
+PLIST
+}
+
 # ─── Argument parsing ────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
@@ -534,6 +568,14 @@ while [[ $# -gt 0 ]]; do
         --xcode-dir=*)
             XCODE_DIR_PROVIDED=true
             XCODE_DIR="${1#*=}"; shift ;;
+        --team-id)
+            if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --team-id requires an ID${NC}"
+                exit 1
+            fi
+            TEAM_ID="$2"; shift 2 ;;
+        --team-id=*)
+            TEAM_ID="${1#*=}"; shift ;;
         --app-id)
             APP_ID="$2"; shift 2 ;;
         --app-id=*)
@@ -544,6 +586,8 @@ while [[ $# -gt 0 ]]; do
             IOS_ONLY=true; shift ;;
         --visionos-only)
             VISIONOS_ONLY=true; shift ;;
+        --macos-only)
+            MACOS_ONLY=true; shift ;;
         --keep-workspace)
             KEEP_WORKSPACE=true; shift ;;
         --verbose)
@@ -570,8 +614,17 @@ if [ -z "$APP_ID" ]; then
     exit 1
 fi
 
-if [ "$IOS_ONLY" = true ] && [ "$VISIONOS_ONLY" = true ]; then
-    echo -e "${RED}Cannot specify both --ios-only and --visionos-only${NC}"
+PLATFORM_ONLY_COUNT=0
+if [ "$IOS_ONLY" = true ]; then PLATFORM_ONLY_COUNT=$((PLATFORM_ONLY_COUNT + 1)); fi
+if [ "$VISIONOS_ONLY" = true ]; then PLATFORM_ONLY_COUNT=$((PLATFORM_ONLY_COUNT + 1)); fi
+if [ "$MACOS_ONLY" = true ]; then PLATFORM_ONLY_COUNT=$((PLATFORM_ONLY_COUNT + 1)); fi
+if [ "$PLATFORM_ONLY_COUNT" -gt 1 ]; then
+    echo -e "${RED}Specify only one of --ios-only, --visionos-only, or --macos-only${NC}"
+    exit 1
+fi
+
+if [ "$MACOS_ONLY" = true ] && [ -z "$TEAM_ID" ]; then
+    echo -e "${RED}Error: --team-id is required with --macos-only${NC}"
     exit 1
 fi
 
@@ -603,7 +656,7 @@ fi
 
 # ─── Step 1: Clone ───────────────────────────────────────────────────────────
 
-log_step "Step 1/6: Clone into isolated workspace"
+log_step "Step 1/7: Clone into isolated workspace"
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp/}xc-ci-XXXXXXXX")
 DERIVED_DATA="$WORK_DIR/DerivedData"
@@ -641,7 +694,7 @@ log_ok "Scheme: $SCHEME"
 # ─── Step 2: Resolve dependencies ────────────────────────────────────────────
 
 step_timer_start
-log_step "Step 2/6: Resolve SPM dependencies"
+log_step "Step 2/7: Resolve SPM dependencies"
 
 if run_xcodebuild "SPM resolve" \
     "${PROJECT_ARG_ARRAY[@]}" \
@@ -657,8 +710,102 @@ else
     exit 1
 fi
 
-# ─── Compute shared build number ─────────────────────────────────────────────
+# ─── Compute build number ──────────────────────────────────────────────────
 
+DO_IOS=true
+DO_VISIONOS=true
+DO_MACOS=false
+if [ "$IOS_ONLY" = true ]; then DO_VISIONOS=false; fi
+if [ "$VISIONOS_ONLY" = true ]; then DO_IOS=false; fi
+if [ "$MACOS_ONLY" = true ]; then
+    DO_IOS=false
+    DO_VISIONOS=false
+    DO_MACOS=true
+fi
+
+if [ "$DO_MACOS" = true ]; then
+    log_info "Querying MARKETING_VERSION from scheme $SCHEME..."
+    BUILD_SETTINGS_ERROR=$(mktemp)
+    set +e
+    BUILD_SETTINGS_JSON=$(run_xcode_tool xcodebuild \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -configuration Release \
+        -destination "generic/platform=macOS" \
+        -showBuildSettings \
+        -json 2>"$BUILD_SETTINGS_ERROR")
+    BUILD_SETTINGS_RESULT=$?
+    set -e
+    if [ "$BUILD_SETTINGS_RESULT" -ne 0 ]; then
+        log_fail "Failed to query MARKETING_VERSION from scheme $SCHEME"
+        head -20 "$BUILD_SETTINGS_ERROR" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo -e "  ${RED}✗${NC} $line"
+        done
+        rm -f "$BUILD_SETTINGS_ERROR"
+        print_summary
+        exit 1
+    fi
+    rm -f "$BUILD_SETTINGS_ERROR"
+
+    MARKETING_VERSION=$(echo "$BUILD_SETTINGS_JSON" | jq -r '
+        ([.[] | select(.buildSettings.PRODUCT_TYPE == "com.apple.product-type.application") | .buildSettings.MARKETING_VERSION]
+        + [.[] | .buildSettings.MARKETING_VERSION])
+        | map(select(. != null and . != ""))
+        | first // empty
+    ' 2>/dev/null)
+    if [ -z "$MARKETING_VERSION" ]; then
+        log_fail "Scheme $SCHEME does not expose a MARKETING_VERSION for macOS"
+        print_summary
+        exit 1
+    fi
+    log_ok "Marketing version: $MARKETING_VERSION"
+
+    MACOS_BUNDLE_ID=$(echo "$BUILD_SETTINGS_JSON" | jq -r '
+        ([.[] | select(.buildSettings.PRODUCT_TYPE == "com.apple.product-type.application") | .buildSettings.PRODUCT_BUNDLE_IDENTIFIER]
+        + [.[] | .buildSettings.PRODUCT_BUNDLE_IDENTIFIER])
+        | map(select(. != null and . != ""))
+        | first // empty
+    ' 2>/dev/null)
+    if [ -n "$MACOS_BUNDLE_ID" ]; then
+        log_ok "Bundle ID: $MACOS_BUNDLE_ID"
+    fi
+
+    log_info "Querying next macOS build number from App Store Connect..."
+    set +e
+    NEXT_BUILD_OUTPUT=$(asc builds next-build-number \
+        --app "$APP_ID" \
+        --version "$MARKETING_VERSION" \
+        --platform MAC_OS \
+        --output json 2>&1)
+    NEXT_BUILD_RESULT=$?
+    set -e
+    if [ "$NEXT_BUILD_RESULT" -ne 0 ]; then
+        log_fail "Failed to query the next macOS build number with asc"
+        echo "$NEXT_BUILD_OUTPUT" | head -20 | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo -e "  ${RED}✗${NC} $line"
+        done
+        print_summary
+        exit 1
+    fi
+    if [ "$VERBOSE" = true ]; then
+        echo "$NEXT_BUILD_OUTPUT"
+    fi
+
+    BUILD_NUMBER=$(echo "$NEXT_BUILD_OUTPUT" | jq -r '
+        if type == "number" or type == "string" then .
+        else .nextBuildNumber // .data.nextBuildNumber // .data.attributes.nextBuildNumber // empty
+        end
+    ' 2>/dev/null)
+    if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+        log_fail "asc returned an invalid next macOS build number"
+        log_info "Output: $NEXT_BUILD_OUTPUT"
+        print_summary
+        exit 1
+    fi
+    log_ok "Build number: $BUILD_NUMBER"
+else
 log_info "Querying App Store Connect for latest build number..."
 set +e
 BUILDS_JSON=$(asc builds list --app "$APP_ID" --sort=-uploadedDate --limit 20 --output json 2>/dev/null)
@@ -673,17 +820,37 @@ LATEST_BUILD=$(echo "$BUILDS_JSON" | jq -r '[.data[].attributes.version | tonumb
 LATEST_BUILD=${LATEST_BUILD:-0}
 BUILD_NUMBER=$((LATEST_BUILD + 1))
 log_ok "Build number: $BUILD_NUMBER (previous: $LATEST_BUILD)"
+fi
 
 # ─── Step 3: Test iOS ────────────────────────────────────────────────────────
 
-DO_IOS=true
-DO_VISIONOS=true
-if [ "$IOS_ONLY" = true ]; then DO_VISIONOS=false; fi
-if [ "$VISIONOS_ONLY" = true ]; then DO_IOS=false; fi
-
-if [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
+if [ "$DO_MACOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     step_timer_start
-    log_step "Step 3/6: Test iOS"
+    log_step "Step 3/7: Test macOS"
+
+    MACOS_RESULT_BUNDLE="$WORK_DIR/macos-test-results.xcresult"
+    if run_xcodebuild "macOS tests" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -destination "platform=macOS" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -resultBundlePath "$MACOS_RESULT_BUNDLE" \
+        -configuration Debug \
+        test; then
+        log_ok "macOS tests passed"
+        record_step "Test macOS" "PASS"
+    else
+        log_fail "macOS tests failed"
+        record_step "Test macOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+elif [ "$DO_MACOS" = true ]; then
+    log_info "Skipping macOS tests (--skip-tests)"
+    record_step "Test macOS" "SKIP"
+elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
+    step_timer_start
+    log_step "Step 3/7: Test iOS"
 
     # Keep the simulator runtime aligned with the selected Xcode SDK. Newer beta
     # runtimes may be visible to stable Xcode but are not a valid CI pairing.
@@ -760,7 +927,7 @@ fi
 
 if [ "$DO_VISIONOS" = true ]; then
     step_timer_start
-    log_step "Step 4/6: Build-check visionOS"
+    log_step "Step 4/7: Build-check visionOS"
 
     if run_xcodebuild "visionOS build" \
         "${PROJECT_ARG_ARRAY[@]}" \
@@ -785,7 +952,7 @@ fi
 
 if [ "$DO_IOS" = true ]; then
     step_timer_start
-    log_step "Step 5/6: Archive + upload iOS"
+    log_step "Step 5/7: Archive + upload iOS"
 
     IOS_ARCHIVE="$WORK_DIR/ios.xcarchive"
 
@@ -862,7 +1029,7 @@ fi
 
 if [ "$DO_VISIONOS" = true ]; then
     step_timer_start
-    log_step "Step 6/6: Archive + upload visionOS"
+    log_step "Step 6/7: Archive + upload visionOS"
 
     VISIONOS_ARCHIVE="$WORK_DIR/visionos.xcarchive"
 
@@ -936,6 +1103,95 @@ else
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
+
+if [ "$DO_MACOS" = true ]; then
+    step_timer_start
+    log_step "Step 7/7: Archive + upload macOS"
+
+    MACOS_ARCHIVE="$WORK_DIR/macos.xcarchive"
+    MACOS_EXPORT_DIR="$WORK_DIR/macos-export"
+    MACOS_EXPORT_PLIST="$WORK_DIR/macos-ExportOptions.plist"
+
+    log_info "Archiving macOS $MARKETING_VERSION (build $BUILD_NUMBER)..."
+    if run_xcodebuild "macOS archive" \
+        "${PROJECT_ARG_ARRAY[@]}" \
+        -scheme "$SCHEME" \
+        -configuration Release \
+        -destination "generic/platform=macOS" \
+        -derivedDataPath "$DERIVED_DATA" \
+        -archivePath "$MACOS_ARCHIVE" \
+        CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+        DEVELOPMENT_TEAM="$TEAM_ID" \
+        -allowProvisioningUpdates \
+        clean archive; then
+        log_ok "macOS archive created"
+    else
+        log_fail "macOS archive failed"
+        record_step "Archive + upload macOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    MACOS_APP=$(find "$MACOS_ARCHIVE/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)
+    if [ -z "$MACOS_APP" ]; then
+        log_fail "macOS archive does not contain an application"
+        record_step "Archive + upload macOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    MACOS_APP_CATEGORY=$(plutil -extract LSApplicationCategoryType raw -o - "$MACOS_APP/Contents/Info.plist" 2>/dev/null || true)
+    if [ -z "$MACOS_APP_CATEGORY" ]; then
+        log_fail "macOS app is missing LSApplicationCategoryType"
+        log_info "Set the target's App Category before uploading to the Mac App Store."
+        record_step "Archive + upload macOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+    log_ok "App category: $MACOS_APP_CATEGORY"
+
+    generate_macos_export_plist "$MACOS_EXPORT_PLIST"
+
+    log_info "Exporting macOS installer package..."
+    if run_xcodebuild "macOS export" \
+        -exportArchive \
+        -archivePath "$MACOS_ARCHIVE" \
+        -exportPath "$MACOS_EXPORT_DIR" \
+        -exportOptionsPlist "$MACOS_EXPORT_PLIST" \
+        -allowProvisioningUpdates; then
+        MACOS_PKG=$(find "$MACOS_EXPORT_DIR" -type f -name '*.pkg' -print -quit)
+        if [ -z "$MACOS_PKG" ]; then
+            log_fail "macOS export did not produce a PKG"
+            record_step "Archive + upload macOS" "FAIL"
+            print_summary
+            exit 3
+        fi
+        log_ok "macOS PKG exported: $(basename "$MACOS_PKG")"
+    else
+        log_fail "macOS export failed"
+        record_step "Archive + upload macOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+
+    log_info "Uploading PKG to App Store Connect with asc..."
+    if run_asc "macOS upload" builds upload \
+        --app "$APP_ID" \
+        --pkg "$MACOS_PKG" \
+        --version "$MARKETING_VERSION" \
+        --build-number "$BUILD_NUMBER" \
+        --wait; then
+        log_ok "macOS build uploaded to App Store Connect"
+        record_step "Archive + upload macOS" "PASS"
+    else
+        log_fail "macOS upload failed"
+        record_step "Archive + upload macOS" "FAIL"
+        print_summary
+        exit 3
+    fi
+else
+    record_step "Archive + upload macOS" "SKIP"
+fi
 
 print_summary
 echo -e "${GREEN}${BOLD}Pipeline complete!${NC}"

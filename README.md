@@ -121,7 +121,7 @@ Simplified Xcode test runner with clear results and isolation commands for failu
 - `--verbose` - Show full xcodebuild output
 
 #### `xc-ci`
-Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp workspace and runs: test iOS, build-check visionOS, archive + upload both platforms to App Store Connect.
+Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp workspace and supports testing, archiving, exporting, and uploading iOS, visionOS, and macOS builds to App Store Connect/TestFlight. macOS exports are uploaded as installer packages.
 
 **Usage:** `xc-ci --repo <url> --app-id <id> [options]`
 
@@ -133,15 +133,19 @@ Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp w
 - `--branch <branch>` - Branch to build [default: main]
 - `--scheme <scheme>` - Xcode scheme [default: auto-detect]
 - `--xcode-dir <path>` - Xcode.app path to use without changing `xcode-select`
-- `--skip-tests` - Skip the iOS test phase
+- `--team-id <id>` - Development team ID [required with `--macos-only`]
+- `--skip-tests` - Skip the platform test phase
 - `--ios-only` - Only test + archive for iOS (skip visionOS)
 - `--visionos-only` - Only build-check + archive for visionOS (skip iOS)
+- `--macos-only` - Test, archive, export a PKG, and upload macOS only
 - `--keep-workspace` - Don't clean up temp directory on exit
 - `--verbose` - Show full xcodebuild output
 
 Build number lookup and uploads use the `asc` CLI. Run `asc auth doctor` before `xc-ci` to verify App Store Connect authentication.
 
-Archive export requires a local distribution signing identity and App Store provisioning profiles. This is a one-time setup per Mac/keychain for the certificate, and per app bundle ID for profiles. `xc-ci` expects installed profiles to be named `xc-ci AppStore <bundle-id>` so it can generate a manual-signing export plist from the archive.
+Archive export requires a local distribution signing identity. iOS and visionOS exports require installed App Store provisioning profiles named `xc-ci AppStore <bundle-id>`. For macOS, `xc-ci` passes `-allowProvisioningUpdates`, uses `--team-id` for `DEVELOPMENT_TEAM`, and generates an App Store Connect export options plist.
+
+The selected macOS target must set an App Category (`LSApplicationCategoryType`); `xc-ci` validates this before export so App Store Connect does not reject the uploaded package.
 
 **Examples:**
 ```bash
@@ -149,6 +153,7 @@ xc-ci --repo git@github.com:user/App.git --app-id 123456789
 xc-ci --repo git@github.com:user/App.git --app-id 123456789 --ios-only
 xc-ci --repo git@github.com:user/App.git --app-id 123456789 --skip-tests
 xc-ci --repo git@github.com:user/App.git --app-id 123456789 --xcode-dir /Applications/Xcode.app
+xc-ci --repo git@github.com:user/MacApp.git --app-id 123456789 --scheme MacApp --team-id ABC1234567 --macos-only
 ```
 
 ## Requirements
