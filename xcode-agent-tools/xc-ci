@@ -414,10 +414,14 @@ archive_bundle_ids() {
 
     plutil -extract CFBundleIdentifier raw -o - "$app_path/Info.plist"
 
-    find "$app_path/PlugIns" -maxdepth 2 -name Info.plist -path '*.appex/Info.plist' -print 2>/dev/null \
-        | while IFS= read -r plist; do
-            plutil -extract CFBundleIdentifier raw -o - "$plist"
-        done
+    local extension_dir
+    for extension_dir in "$app_path/PlugIns" "$app_path/Extensions"; do
+        [ -d "$extension_dir" ] || continue
+        find "$extension_dir" -maxdepth 2 -name Info.plist -path '*.appex/Info.plist' -print 2>/dev/null \
+            | while IFS= read -r plist; do
+                plutil -extract CFBundleIdentifier raw -o - "$plist"
+            done
+    done
 }
 
 ensure_distribution_identity() {
