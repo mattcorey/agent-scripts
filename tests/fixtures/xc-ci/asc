@@ -13,6 +13,11 @@ if [ "$1 $2" = "builds next-build-number" ]; then
     exit 0
 fi
 
+if [ "$1 $2" = "builds list" ]; then
+    echo '{"data":[]}'
+    exit 0
+fi
+
 if [ "$1 $2" = "builds upload" ]; then
     exit 0
 fi

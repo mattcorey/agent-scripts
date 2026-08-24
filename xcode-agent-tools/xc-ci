@@ -37,6 +37,7 @@ NC='\033[0m'
 
 STEP_RESULTS=()
 WORK_DIR=""
+IOS_TEST_SIMULATOR_ID=""
 PIPELINE_START=$SECONDS
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -164,8 +165,29 @@ print_summary() {
     echo ""
 }
 
+cleanup_ios_test_simulator() {
+    if [ -z "$IOS_TEST_SIMULATOR_ID" ]; then
+        return 0
+    fi
+
+    local simulator_id="$IOS_TEST_SIMULATOR_ID"
+
+    log_info "Deleting temporary iOS simulator ($simulator_id)..."
+    run_xcode_tool xcrun simctl shutdown "$simulator_id" >/dev/null 2>&1 || true
+    if run_xcode_tool xcrun simctl delete "$simulator_id" >/dev/null 2>&1; then
+        IOS_TEST_SIMULATOR_ID=""
+    else
+        log_warn "Could not delete temporary iOS simulator: $simulator_id"
+        return 1
+    fi
+}
+
 cleanup() {
     local exit_status=$?
+    local simulator_cleanup_failed=false
+    if ! cleanup_ios_test_simulator; then
+        simulator_cleanup_failed=true
+    fi
     if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
         if [ "$exit_status" -ne 0 ]; then
             log_warn "Pipeline failed; preserving workspace: $WORK_DIR"
@@ -176,6 +198,12 @@ cleanup() {
             rm -rf "$WORK_DIR"
         fi
     fi
+    if [ "$exit_status" -eq 0 ] && [ "$simulator_cleanup_failed" = true ]; then
+        log_fail "Pipeline completed, but temporary iOS simulator cleanup failed"
+        trap - EXIT
+        exit 1
+    fi
+    return "$exit_status"
 }
 
 run_xcode_tool() {
@@ -867,31 +895,99 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     fi
     IOS_RUNTIME_ID="com.apple.CoreSimulator.SimRuntime.iOS-${IOS_SDK_VERSION//./-}"
 
-    # Find the best available iPhone on that runtime: prefer Pro Max, then Pro, then any.
-    IOS_SIM_ID=$(run_xcode_tool xcrun simctl list devices available -j \
-        | jq -r --arg runtime "$IOS_RUNTIME_ID" '
-            [.devices[$runtime][]? | select(.name | test("^iPhone")) | select(.isAvailable == true)]
-            | (map(select(.name | test("Pro Max"))) | first)
-              // (map(select(.name | test("Pro"))) | first)
-              // first
-            | .udid
-        ' 2>/dev/null)
-    if [ -z "$IOS_SIM_ID" ] || [ "$IOS_SIM_ID" = "null" ]; then
-        log_fail "No available iPhone simulator found for iOS $IOS_SDK_VERSION"
+    IOS_RUNTIME_AVAILABLE=$(run_xcode_tool xcrun simctl list runtimes available -j 2>/dev/null \
+        | jq -r --arg runtime "$IOS_RUNTIME_ID" \
+            '[.runtimes[]? | select(.identifier == $runtime and .isAvailable == true)] | length > 0' \
+            2>/dev/null || true)
+    if [ "$IOS_RUNTIME_AVAILABLE" != "true" ]; then
+        log_fail "The selected Xcode does not expose an available iOS $IOS_SDK_VERSION simulator runtime ($IOS_RUNTIME_ID)"
         record_step "Test iOS" "FAIL"
         print_summary
         exit 1
     fi
-    IOS_SIM_NAME=$(run_xcode_tool xcrun simctl list devices available -j \
-        | jq -r --arg id "$IOS_SIM_ID" '.devices[][] | select(.udid == $id) | .name' 2>/dev/null)
-    log_info "Using simulator: $IOS_SIM_NAME, iOS $IOS_SDK_VERSION ($IOS_SIM_ID)"
+
+    # Prefer Pro Max, then Pro, then any iPhone device type.
+    IOS_DEVICE_TYPE=$(run_xcode_tool xcrun simctl list devicetypes -j 2>/dev/null \
+        | jq -r --arg sdk "$IOS_SDK_VERSION" '
+            ($sdk | split(".") | map(tonumber) + [0, 0, 0]) as $version
+            | (($version[0] * 65536) + ($version[1] * 256) + $version[2]) as $runtime_version
+            | [.devicetypes[]?
+                | select(.productFamily == "iPhone" or (.name | test("^iPhone")))
+                | select((.minRuntimeVersion // 0) <= $runtime_version)
+                | select((.maxRuntimeVersion // 4294967295) >= $runtime_version)]
+            | ((map(select(.name | test("Pro Max"))) | first)
+              // (map(select(.name | test("Pro"))) | first)
+              // first)
+            | select(. != null)
+            | [.name, .identifier]
+            | @tsv
+        ' 2>/dev/null || true)
+    IFS=$'\t' read -r IOS_DEVICE_TYPE_NAME IOS_DEVICE_TYPE_ID <<< "$IOS_DEVICE_TYPE"
+    if [ -z "$IOS_DEVICE_TYPE_ID" ]; then
+        log_fail "No iPhone simulator device type is available in the selected Xcode"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+
+    IOS_SIMULATOR_NAME="xc-ci-iOS-$$-$(date +%s)-$RANDOM"
+    IOS_SIMULATOR_CREATE_ERROR=$(mktemp)
+    set +e
+    CREATED_IOS_SIMULATOR_ID=$(run_xcode_tool xcrun simctl create \
+        "$IOS_SIMULATOR_NAME" \
+        "$IOS_DEVICE_TYPE_ID" \
+        "$IOS_RUNTIME_ID" 2>"$IOS_SIMULATOR_CREATE_ERROR")
+    IOS_SIMULATOR_CREATE_RESULT=$?
+    set -e
+    CREATED_IOS_SIMULATOR_ID=$(echo "$CREATED_IOS_SIMULATOR_ID" | tr -d '[:space:]')
+
+    if [ "$IOS_SIMULATOR_CREATE_RESULT" -ne 0 ]; then
+        log_fail "Could not create a temporary iOS $IOS_SDK_VERSION simulator"
+        head -10 "$IOS_SIMULATOR_CREATE_ERROR" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo -e "  ${RED}✗${NC} $line"
+        done
+        rm -f "$IOS_SIMULATOR_CREATE_ERROR"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+    rm -f "$IOS_SIMULATOR_CREATE_ERROR"
+
+    DISCOVERED_IOS_SIMULATOR_ID=$(run_xcode_tool xcrun simctl list devices -j 2>/dev/null \
+        | jq -r --arg runtime "$IOS_RUNTIME_ID" --arg name "$IOS_SIMULATOR_NAME" '
+            [.devices[$runtime][]? | select(.name == $name)]
+            | if length == 1 then .[0].udid else empty end
+        ' 2>/dev/null || true)
+
+    if ! [[ "$CREATED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+        if [[ "$DISCOVERED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+            IOS_TEST_SIMULATOR_ID="$DISCOVERED_IOS_SIMULATOR_ID"
+        fi
+        log_fail "simctl create returned an invalid simulator UDID: ${CREATED_IOS_SIMULATOR_ID:-<empty>}"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+    if [ "$DISCOVERED_IOS_SIMULATOR_ID" != "$CREATED_IOS_SIMULATOR_ID" ]; then
+        if [[ "$DISCOVERED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+            IOS_TEST_SIMULATOR_ID="$DISCOVERED_IOS_SIMULATOR_ID"
+        fi
+        log_fail "Could not validate the newly created iOS simulator on $IOS_RUNTIME_ID"
+        log_info "simctl create returned $CREATED_IOS_SIMULATOR_ID; the unique-name lookup found ${DISCOVERED_IOS_SIMULATOR_ID:-no device}"
+        record_step "Test iOS" "FAIL"
+        print_summary
+        exit 1
+    fi
+    IOS_TEST_SIMULATOR_ID="$CREATED_IOS_SIMULATOR_ID"
+    log_info "Created temporary simulator: $IOS_SIMULATOR_NAME ($IOS_DEVICE_TYPE_NAME), iOS $IOS_SDK_VERSION ($IOS_TEST_SIMULATOR_ID)"
 
     RESULT_BUNDLE="$WORK_DIR/test_results.xcresult"
 
     if run_xcodebuild "iOS tests" \
         "${PROJECT_ARG_ARRAY[@]}" \
         -scheme "$SCHEME" \
-        -destination "platform=iOS Simulator,id=$IOS_SIM_ID" \
+        -destination "platform=iOS Simulator,id=$IOS_TEST_SIMULATOR_ID" \
         -derivedDataPath "$DERIVED_DATA" \
         -resultBundlePath "$RESULT_BUNDLE" \
         -configuration Debug \
@@ -913,8 +1009,18 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
         else
             log_ok "Tests passed"
         fi
+        if ! cleanup_ios_test_simulator; then
+            log_info "Retrying temporary simulator cleanup..."
+            if ! cleanup_ios_test_simulator; then
+                log_fail "iOS tests passed, but temporary simulator cleanup failed"
+                record_step "Test iOS" "FAIL"
+                print_summary
+                exit 1
+            fi
+        fi
         record_step "Test iOS" "PASS"
     else
+        cleanup_ios_test_simulator || true
         log_fail "iOS tests failed"
         record_step "Test iOS" "FAIL"
         print_summary

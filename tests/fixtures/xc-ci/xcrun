@@ -1,0 +1,73 @@
+#!/bin/bash
+
+set -e
+
+echo "DEVELOPER_DIR=${DEVELOPER_DIR:-} | $*" >> "$XCRUN_COMMAND_LOG"
+
+case " $* " in
+    *" --sdk iphonesimulator --show-sdk-version "*)
+        echo "27.0"
+        ;;
+    *" simctl list devices available -j "*)
+        cat << 'JSON'
+{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-27-0":[{"name":"iPhone 99 Pro Max","udid":"11111111-1111-1111-1111-111111111111","isAvailable":true}]}}
+JSON
+        ;;
+    *" simctl list devices -j "*)
+        created_name="xc-ci fixture"
+        created_id="${XC_CI_ACTUAL_SIMULATOR_UDID:-${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}}"
+        if [ -f "$XC_CI_XCRUN_STATE_DIR/created-name" ]; then
+            created_name=$(<"$XC_CI_XCRUN_STATE_DIR/created-name")
+        fi
+        if [ -f "$XC_CI_XCRUN_STATE_DIR/created-id" ]; then
+            created_id=$(<"$XC_CI_XCRUN_STATE_DIR/created-id")
+        fi
+        printf '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-27-0":[{"name":"%s","udid":"%s","isAvailable":true}]}}\n' \
+            "$created_name" "$created_id"
+        ;;
+    *" simctl list runtimes available -j "*)
+        if [ "${XC_CI_NO_RUNTIME:-false}" = true ]; then
+            echo '{"runtimes":[]}'
+            exit 0
+        fi
+        cat << 'JSON'
+{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-27-0","name":"iOS 27.0","isAvailable":true}]}
+JSON
+        ;;
+    *" simctl list devicetypes -j "*)
+        if [ "${XC_CI_NO_DEVICE_TYPE:-false}" = true ]; then
+            echo '{"devicetypes":[]}'
+            exit 0
+        fi
+        cat << 'JSON'
+{"devicetypes":[{"name":"iPhone 100 Pro Max","identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-100-Pro-Max","productFamily":"iPhone","minRuntimeVersion":1835008,"maxRuntimeVersion":4294967295},{"name":"iPhone 99 Pro","identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-99-Pro","productFamily":"iPhone","minRuntimeVersion":1703936,"maxRuntimeVersion":4294967295},{"name":"iPhone 99","identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-99","productFamily":"iPhone","minRuntimeVersion":1703936,"maxRuntimeVersion":4294967295}]}
+JSON
+        ;;
+    *" simctl create "*)
+        if [ "${XC_CI_FAIL_CREATE:-false}" = true ]; then
+            echo "fixture simulator creation failure" >&2
+            exit 2
+        fi
+        printf '%s' "$3" > "$XC_CI_XCRUN_STATE_DIR/created-name"
+        printf '%s' "${XC_CI_ACTUAL_SIMULATOR_UDID:-${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}}" \
+            > "$XC_CI_XCRUN_STATE_DIR/created-id"
+        echo "${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
+        ;;
+    *" simctl shutdown "*)
+        ;;
+    *" simctl delete "*)
+        if [ "${XC_CI_FAIL_DELETE:-false}" = true ]; then
+            echo "fixture persistent simulator deletion failure" >&2
+            exit 2
+        fi
+        if [ "${XC_CI_FAIL_FIRST_DELETE:-false}" = true ] && [ ! -f "$XC_CI_DELETE_ATTEMPT_FILE" ]; then
+            touch "$XC_CI_DELETE_ATTEMPT_FILE"
+            echo "fixture transient simulator deletion failure" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "Unexpected xcrun command: $*" >&2
+        exit 1
+        ;;
+esac
