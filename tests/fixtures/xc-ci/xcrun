@@ -14,6 +14,10 @@ case " $* " in
 JSON
         ;;
     *" simctl list devices -j "*)
+        if [ "${XC_CI_EMPTY_DEVICE_DISCOVERY:-false}" = true ]; then
+            echo '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-27-0":[]}}'
+            exit 0
+        fi
         created_name="xc-ci fixture"
         created_id="${XC_CI_ACTUAL_SIMULATOR_UDID:-${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}}"
         if [ -f "$XC_CI_XCRUN_STATE_DIR/created-name" ]; then

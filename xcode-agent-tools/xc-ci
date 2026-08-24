@@ -954,6 +954,12 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     fi
     rm -f "$IOS_SIMULATOR_CREATE_ERROR"
 
+    # A successful simctl create owns its valid returned UDID. Retain it for
+    # cleanup even if the following unique-name lookup is temporarily empty.
+    if [[ "$CREATED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+        IOS_TEST_SIMULATOR_ID="$CREATED_IOS_SIMULATOR_ID"
+    fi
+
     DISCOVERED_IOS_SIMULATOR_ID=$(run_xcode_tool xcrun simctl list devices -j 2>/dev/null \
         | jq -r --arg runtime "$IOS_RUNTIME_ID" --arg name "$IOS_SIMULATOR_NAME" '
             [.devices[$runtime][]? | select(.name == $name)]

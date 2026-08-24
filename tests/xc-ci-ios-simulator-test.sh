@@ -192,6 +192,23 @@ assert_not_contains "$XCRUN_COMMAND_LOG" "simctl delete DDDDDDDD-DDDD-DDDD-DDDD-
 assert_not_contains "$XCODEBUILD_COMMAND_LOG" " test"
 assert_not_contains "$ASC_COMMAND_LOG" "builds upload"
 
+export ASC_COMMAND_LOG="$TEST_TMP/empty-discovery-asc.log"
+export XCODEBUILD_COMMAND_LOG="$TEST_TMP/empty-discovery-xcodebuild.log"
+export XCRUN_COMMAND_LOG="$TEST_TMP/empty-discovery-xcrun.log"
+EMPTY_DISCOVERY_OUTPUT="$TEST_TMP/empty-discovery.txt"
+set +e
+XC_CI_EMPTY_DEVICE_DISCOVERY=true \
+XC_CI_SIMULATOR_UDID="77777777-7777-7777-7777-777777777777" \
+    run_ios_fixture > "$EMPTY_DISCOVERY_OUTPUT" 2>&1
+EMPTY_DISCOVERY_STATUS=$?
+set -e
+
+[ "$EMPTY_DISCOVERY_STATUS" -ne 0 ] || fail "The empty simulator discovery fixture unexpectedly succeeded"
+assert_contains "$EMPTY_DISCOVERY_OUTPUT" "Could not validate the newly created iOS simulator"
+assert_contains "$XCRUN_COMMAND_LOG" "simctl delete 77777777-7777-7777-7777-777777777777"
+assert_not_contains "$XCODEBUILD_COMMAND_LOG" " test"
+assert_not_contains "$ASC_COMMAND_LOG" "builds upload"
+
 export ASC_COMMAND_LOG="$TEST_TMP/skip-tests-asc.log"
 export XCODEBUILD_COMMAND_LOG="$TEST_TMP/skip-tests-xcodebuild.log"
 export XCRUN_COMMAND_LOG="$TEST_TMP/skip-tests-xcrun.log"
