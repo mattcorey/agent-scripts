@@ -187,8 +187,8 @@ set -e
 
 [ "$VALIDATION_FAILURE_STATUS" -ne 0 ] || fail "The simulator validation failure fixture unexpectedly succeeded"
 assert_contains "$VALIDATION_FAILURE_OUTPUT" "Could not validate the newly created iOS simulator"
-assert_contains "$XCRUN_COMMAND_LOG" "simctl delete 99999999-9999-9999-9999-999999999999"
-assert_not_contains "$XCRUN_COMMAND_LOG" "simctl delete DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"
+assert_contains "$XCRUN_COMMAND_LOG" "simctl delete DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"
+assert_not_contains "$XCRUN_COMMAND_LOG" "simctl delete 99999999-9999-9999-9999-999999999999"
 assert_not_contains "$XCODEBUILD_COMMAND_LOG" " test"
 assert_not_contains "$ASC_COMMAND_LOG" "builds upload"
 

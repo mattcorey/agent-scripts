@@ -976,9 +976,6 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
         exit 1
     fi
     if [ "$DISCOVERED_IOS_SIMULATOR_ID" != "$CREATED_IOS_SIMULATOR_ID" ]; then
-        if [[ "$DISCOVERED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
-            IOS_TEST_SIMULATOR_ID="$DISCOVERED_IOS_SIMULATOR_ID"
-        fi
         log_fail "Could not validate the newly created iOS simulator on $IOS_RUNTIME_ID"
         log_info "simctl create returned $CREATED_IOS_SIMULATOR_ID; the unique-name lookup found ${DISCOVERED_IOS_SIMULATOR_ID:-no device}"
         record_step "Test iOS" "FAIL"
