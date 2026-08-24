@@ -38,6 +38,8 @@ NC='\033[0m'
 STEP_RESULTS=()
 WORK_DIR=""
 IOS_TEST_SIMULATOR_ID=""
+IOS_SIMULATOR_NAME=""
+IOS_RUNTIME_ID=""
 PIPELINE_START=$SECONDS
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -166,6 +168,18 @@ print_summary() {
 }
 
 cleanup_ios_test_simulator() {
+    if [ -z "$IOS_TEST_SIMULATOR_ID" ] && [ -n "$IOS_SIMULATOR_NAME" ] && [ -n "$IOS_RUNTIME_ID" ]; then
+        local discovered_simulator_id
+        discovered_simulator_id=$(run_xcode_tool xcrun simctl list devices -j 2>/dev/null \
+            | jq -r --arg runtime "$IOS_RUNTIME_ID" --arg name "$IOS_SIMULATOR_NAME" '
+                [.devices[$runtime][]? | select(.name == $name)]
+                | if length == 1 then .[0].udid else empty end
+            ' 2>/dev/null || true)
+        if [[ "$discovered_simulator_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+            IOS_TEST_SIMULATOR_ID="$discovered_simulator_id"
+        fi
+    fi
+
     if [ -z "$IOS_TEST_SIMULATOR_ID" ]; then
         return 0
     fi

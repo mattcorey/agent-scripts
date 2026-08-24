@@ -224,6 +224,46 @@ if [ -e "$XCRUN_COMMAND_LOG" ]; then
     fail "Skipping iOS tests must not inspect, create, or clean up a simulator"
 fi
 
+export ASC_COMMAND_LOG="$TEST_TMP/create-signal-asc.log"
+export XCODEBUILD_COMMAND_LOG="$TEST_TMP/create-signal-xcodebuild.log"
+export XCRUN_COMMAND_LOG="$TEST_TMP/create-signal-xcrun.log"
+CREATE_STARTED_FILE="$TEST_TMP/create-started"
+RELEASE_CREATE_FILE="$TEST_TMP/release-create"
+CREATE_SIGNAL_OUTPUT="$TEST_TMP/create-signal.txt"
+
+XC_CI_BLOCK_CREATE=true \
+XC_CI_CREATE_STARTED_FILE="$CREATE_STARTED_FILE" \
+XC_CI_RELEASE_CREATE_FILE="$RELEASE_CREATE_FILE" \
+XC_CI_SIMULATOR_UDID="66666666-6666-6666-6666-666666666666" \
+    "$REPO_ROOT/xcode-agent-tools/xc-ci" \
+        --repo git@github.com:example/ExampleApp.git \
+        --app-id 1234567890 \
+        --branch main \
+        --scheme ExampleApp \
+        --ios-only \
+        --xcode-dir "$FAKE_XCODE" \
+        --verbose > "$CREATE_SIGNAL_OUTPUT" 2>&1 &
+CREATE_SIGNAL_PIPELINE_PID=$!
+
+for _ in {1..100}; do
+    [ -f "$CREATE_STARTED_FILE" ] && break
+    sleep 0.05
+done
+[ -f "$CREATE_STARTED_FILE" ] || fail "Timed out waiting for simulator creation to start"
+
+kill -TERM "$CREATE_SIGNAL_PIPELINE_PID"
+touch "$RELEASE_CREATE_FILE"
+set +e
+wait "$CREATE_SIGNAL_PIPELINE_PID" 2>/dev/null
+CREATE_SIGNAL_STATUS=$?
+set -e
+
+[ "$CREATE_SIGNAL_STATUS" -ne 0 ] || fail "The create-signal pipeline unexpectedly succeeded"
+assert_contains "$XCRUN_COMMAND_LOG" "simctl delete 66666666-6666-6666-6666-666666666666"
+assert_not_contains "$XCODEBUILD_COMMAND_LOG" " test"
+assert_not_contains "$XCODEBUILD_COMMAND_LOG" " archive"
+assert_not_contains "$ASC_COMMAND_LOG" "builds upload"
+
 export ASC_COMMAND_LOG="$TEST_TMP/signal-asc.log"
 export XCODEBUILD_COMMAND_LOG="$TEST_TMP/signal-xcodebuild.log"
 export XCRUN_COMMAND_LOG="$TEST_TMP/signal-xcrun.log"
