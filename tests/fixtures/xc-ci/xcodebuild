@@ -15,6 +15,21 @@ case " $* " in
         echo '[{"target":"ExampleMacApp","buildSettings":{"PRODUCT_TYPE":"com.apple.product-type.application","MARKETING_VERSION":"1.4.0","PRODUCT_BUNDLE_IDENTIFIER":"com.example.macapp"}}]'
         exit 0
         ;;
+    *" test "*)
+        if [ "${XC_CI_BLOCK_TESTS:-false}" = true ]; then
+            touch "$XC_CI_TESTS_STARTED_FILE"
+            original_parent=$PPID
+            while kill -0 "$original_parent" 2>/dev/null; do
+                sleep 0.05
+            done
+            exit 143
+        fi
+        if [ "${XC_CI_FAIL_TESTS:-false}" = true ]; then
+            echo "error: fixture test failure" >&2
+            exit 65
+        fi
+        exit 0
+        ;;
 esac
 
 archive_path=""
@@ -31,11 +46,21 @@ done
 
 case " $* " in
     *" clean archive "*)
+        if [ "${XC_CI_FAIL_ARCHIVE:-false}" = true ]; then
+            echo "error: fixture archive failure" >&2
+            exit 65
+        fi
         app_path="$archive_path/Products/Applications/ExampleMacApp.app/Contents"
         mkdir -p "$app_path"
         plutil -create xml1 "$app_path/Info.plist"
         plutil -insert CFBundleIdentifier -string "com.example.macapp" "$app_path/Info.plist"
         plutil -insert LSApplicationCategoryType -string "public.app-category.productivity" "$app_path/Info.plist"
+        ;;
+    *" archive "*)
+        if [ "${XC_CI_FAIL_ARCHIVE:-false}" = true ]; then
+            echo "error: fixture archive failure" >&2
+            exit 65
+        fi
         ;;
     *" -exportArchive "*)
         if [ "${XC_CI_FAIL_EXPORT:-false}" = true ]; then

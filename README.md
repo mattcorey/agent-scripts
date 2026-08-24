@@ -123,6 +123,8 @@ Simplified Xcode test runner with clear results and isolation commands for failu
 #### `xc-ci`
 Local CI pipeline replicating Xcode Cloud. Clones a repo into an isolated temp workspace and supports testing, archiving, exporting, and uploading iOS, visionOS, and macOS builds to App Store Connect/TestFlight. macOS exports are uploaded as installer packages.
 
+Each iOS test phase creates a uniquely named simulator on the selected Xcode's matching runtime, then requests shutdown and deletion after the test, including on failure or interruption. Cleanup is retried once after a successful test, and the pipeline fails before archive or upload if deletion still does not succeed. Existing developer simulators are never selected, erased, or deleted.
+
 **Usage:** `xc-ci --repo <url> --app-id <id> [options]`
 
 **Required:**
