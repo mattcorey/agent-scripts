@@ -252,6 +252,11 @@ done
 [ -f "$CREATE_STARTED_FILE" ] || fail "Timed out waiting for simulator creation to start"
 
 kill -TERM "$CREATE_SIGNAL_PIPELINE_PID"
+sleep 0.2
+if ! kill -0 "$CREATE_SIGNAL_PIPELINE_PID" 2>/dev/null; then
+    fail "Cleanup abandoned an in-flight simulator creation"
+fi
+[ ! -f "$XC_CI_XCRUN_STATE_DIR/created-name" ] || fail "The create fixture registered the simulator before cleanup began"
 touch "$RELEASE_CREATE_FILE"
 set +e
 wait "$CREATE_SIGNAL_PIPELINE_PID" 2>/dev/null

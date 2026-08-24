@@ -40,6 +40,9 @@ WORK_DIR=""
 IOS_TEST_SIMULATOR_ID=""
 IOS_SIMULATOR_NAME=""
 IOS_RUNTIME_ID=""
+IOS_SIMULATOR_CREATE_PID=""
+IOS_SIMULATOR_CREATE_OUTPUT=""
+IOS_SIMULATOR_CREATE_ERROR=""
 PIPELINE_START=$SECONDS
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -168,6 +171,28 @@ print_summary() {
 }
 
 cleanup_ios_test_simulator() {
+    if [ -n "$IOS_SIMULATOR_CREATE_PID" ]; then
+        wait "$IOS_SIMULATOR_CREATE_PID" 2>/dev/null || true
+        IOS_SIMULATOR_CREATE_PID=""
+    fi
+
+    if [ -z "$IOS_TEST_SIMULATOR_ID" ] && [ -n "$IOS_SIMULATOR_CREATE_OUTPUT" ] && [ -f "$IOS_SIMULATOR_CREATE_OUTPUT" ]; then
+        local created_simulator_id
+        created_simulator_id=$(tr -d '[:space:]' < "$IOS_SIMULATOR_CREATE_OUTPUT")
+        if [[ "$created_simulator_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+            IOS_TEST_SIMULATOR_ID="$created_simulator_id"
+        fi
+    fi
+
+    if [ -n "$IOS_SIMULATOR_CREATE_OUTPUT" ]; then
+        rm -f "$IOS_SIMULATOR_CREATE_OUTPUT"
+        IOS_SIMULATOR_CREATE_OUTPUT=""
+    fi
+    if [ -n "$IOS_SIMULATOR_CREATE_ERROR" ]; then
+        rm -f "$IOS_SIMULATOR_CREATE_ERROR"
+        IOS_SIMULATOR_CREATE_ERROR=""
+    fi
+
     if [ -z "$IOS_TEST_SIMULATOR_ID" ] && [ -n "$IOS_SIMULATOR_NAME" ] && [ -n "$IOS_RUNTIME_ID" ]; then
         local discovered_simulator_id
         discovered_simulator_id=$(run_xcode_tool xcrun simctl list devices -j 2>/dev/null \
@@ -945,15 +970,19 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
     fi
 
     IOS_SIMULATOR_NAME="xc-ci-iOS-$$-$(date +%s)-$RANDOM"
+    IOS_SIMULATOR_CREATE_OUTPUT=$(mktemp)
     IOS_SIMULATOR_CREATE_ERROR=$(mktemp)
     set +e
-    CREATED_IOS_SIMULATOR_ID=$(run_xcode_tool xcrun simctl create \
+    run_xcode_tool xcrun simctl create \
         "$IOS_SIMULATOR_NAME" \
         "$IOS_DEVICE_TYPE_ID" \
-        "$IOS_RUNTIME_ID" 2>"$IOS_SIMULATOR_CREATE_ERROR")
+        "$IOS_RUNTIME_ID" >"$IOS_SIMULATOR_CREATE_OUTPUT" 2>"$IOS_SIMULATOR_CREATE_ERROR" &
+    IOS_SIMULATOR_CREATE_PID=$!
+    wait "$IOS_SIMULATOR_CREATE_PID"
     IOS_SIMULATOR_CREATE_RESULT=$?
+    IOS_SIMULATOR_CREATE_PID=""
     set -e
-    CREATED_IOS_SIMULATOR_ID=$(echo "$CREATED_IOS_SIMULATOR_ID" | tr -d '[:space:]')
+    CREATED_IOS_SIMULATOR_ID=$(tr -d '[:space:]' < "$IOS_SIMULATOR_CREATE_OUTPUT")
 
     if [ "$IOS_SIMULATOR_CREATE_RESULT" -ne 0 ]; then
         log_fail "Could not create a temporary iOS $IOS_SDK_VERSION simulator"
@@ -961,18 +990,22 @@ elif [ "$DO_IOS" = true ] && [ "$SKIP_TESTS" = false ]; then
             [ -z "$line" ] && continue
             echo -e "  ${RED}✗${NC} $line"
         done
-        rm -f "$IOS_SIMULATOR_CREATE_ERROR"
+        rm -f "$IOS_SIMULATOR_CREATE_OUTPUT" "$IOS_SIMULATOR_CREATE_ERROR"
+        IOS_SIMULATOR_CREATE_OUTPUT=""
+        IOS_SIMULATOR_CREATE_ERROR=""
         record_step "Test iOS" "FAIL"
         print_summary
         exit 1
     fi
-    rm -f "$IOS_SIMULATOR_CREATE_ERROR"
 
     # A successful simctl create owns its valid returned UDID. Retain it for
     # cleanup even if the following unique-name lookup is temporarily empty.
     if [[ "$CREATED_IOS_SIMULATOR_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
         IOS_TEST_SIMULATOR_ID="$CREATED_IOS_SIMULATOR_ID"
     fi
+    rm -f "$IOS_SIMULATOR_CREATE_OUTPUT" "$IOS_SIMULATOR_CREATE_ERROR"
+    IOS_SIMULATOR_CREATE_OUTPUT=""
+    IOS_SIMULATOR_CREATE_ERROR=""
 
     DISCOVERED_IOS_SIMULATOR_ID=$(run_xcode_tool xcrun simctl list devices -j 2>/dev/null \
         | jq -r --arg runtime "$IOS_RUNTIME_ID" --arg name "$IOS_SIMULATOR_NAME" '

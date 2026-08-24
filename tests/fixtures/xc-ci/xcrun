@@ -52,15 +52,15 @@ JSON
             echo "fixture simulator creation failure" >&2
             exit 2
         fi
-        printf '%s' "$3" > "$XC_CI_XCRUN_STATE_DIR/created-name"
-        printf '%s' "${XC_CI_ACTUAL_SIMULATOR_UDID:-${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}}" \
-            > "$XC_CI_XCRUN_STATE_DIR/created-id"
         if [ "${XC_CI_BLOCK_CREATE:-false}" = true ]; then
             touch "$XC_CI_CREATE_STARTED_FILE"
             while [ ! -f "$XC_CI_RELEASE_CREATE_FILE" ]; do
                 sleep 0.05
             done
         fi
+        printf '%s' "$3" > "$XC_CI_XCRUN_STATE_DIR/created-name"
+        printf '%s' "${XC_CI_ACTUAL_SIMULATOR_UDID:-${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}}" \
+            > "$XC_CI_XCRUN_STATE_DIR/created-id"
         echo "${XC_CI_SIMULATOR_UDID:-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
         ;;
     *" simctl shutdown "*)
